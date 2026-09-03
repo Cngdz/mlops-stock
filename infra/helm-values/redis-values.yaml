@@ -1,0 +1,33 @@
+image:
+  registry: docker.io
+  repository: bitnamilegacy/redis
+  tag: 7.2.4-debian-12-r9
+
+# Chế độ hoạt động độc lập (1 node master) để tiết kiệm tài nguyên
+architecture: standalone
+
+# Cấu hình xác thực (tắt mật khẩu hoặc đặt mật khẩu đơn giản cho lab)
+auth:
+  enabled: false
+
+# Cấu hình lưu trữ (PVC) và probes
+master:
+  persistence:
+    size: "1Gi"
+  livenessProbe:
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 5
+  readinessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 5
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 15
+

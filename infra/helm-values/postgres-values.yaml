@@ -1,0 +1,32 @@
+image:
+  registry: docker.io
+  repository: bitnamilegacy/postgresql
+  tag: 16.4.0-debian-12-r14
+
+# Cấu hình tài khoản và DB khởi tạo
+auth:
+  postgresPassword: "mlflowpassword"
+  database: "mlflow"
+
+# Cấu hình tài nguyên lưu trữ (PVC) và probes
+primary:
+  persistence:
+    size: "2Gi"
+  livenessProbe:
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+  readinessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 15
+
+

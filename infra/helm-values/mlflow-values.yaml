@@ -1,0 +1,53 @@
+# Backend Store (PostgreSQL)
+backendStore:
+  postgres:
+    enabled: true
+    host: "postgres-postgresql.mlops.svc.cluster.local"
+    port: 5432
+    database: "mlflow"
+    user: "postgres"
+    password: "mlflowpassword"
+  databaseMigration: true
+  databaseConnectionCheck: true
+
+# Artifact Store (MinIO S3-compatible)
+artifactRoot:
+  s3:
+    enabled: true
+    bucket: "mlflow"
+    awsAccessKeyId: "minioadmin"
+    awsSecretAccessKey: "minioadmin"
+
+# MinIO custom endpoint
+extraEnvVars:
+  MLFLOW_S3_ENDPOINT_URL: "http://minio.mlops.svc.cluster.local:9000"
+
+# MLflow 3.x Security Middleware
+corsAllowedOrigins:
+  - "*"
+serverAllowedHosts:
+  - "*"
+
+extraArgs:
+  workers: "1"
+
+# Tăng delay để tránh bị kill quá sớm khi khởi động
+livenessProbe:
+  initialDelaySeconds: 60
+  periodSeconds: 15
+  timeoutSeconds: 10
+  failureThreshold: 5
+
+readinessProbe:
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 10
+  failureThreshold: 3
+
+resources:
+  requests:
+    cpu: "200m"
+    memory: "512Mi"
+  limits:
+    cpu: "1000m"
+    memory: "2Gi"
