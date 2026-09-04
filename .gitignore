@@ -160,6 +160,7 @@ env.bak/
 venv.bak/
 
 # Generated datasets and local DuckDB catalogs (do not commit binary data)
+data/
 data/generated/
 *.duckdb
 *.duckdb.wal
