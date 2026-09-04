@@ -44,7 +44,7 @@ cancelled_rate: 0.02
 min_event_amount_vnd: 1000000
 min_margin_limit_vnd: 5000000
 max_margin_limit_vnd: 500000000
-repayment_probability_if_debt: 0.05
+repayment_probability_if_debt: 0.10
 repayment_ratio_mean: 0.15
 repayment_ratio_sigma: 0.05
 positive_rate_targets:
@@ -121,7 +121,7 @@ price_generation:
   price_ceiling: 500000
 
 repayment_generation:
-  probability_if_active_and_debt: 0.05
+  probability_if_active_and_debt: 0.10
   ratio_mean: 0.15
   ratio_sigma: 0.05
   minimum_amount: 1000000
@@ -419,10 +419,12 @@ Repayment được sinh độc lập ở §8.5, không nằm trong Bernoulli dis
 
 ### 8.5 Cadence repayment độc lập
 
+Cập nhật được người dùng đồng ý ngày 2026-09-04: tăng xác suất trả nợ từ 0.05 lên 0.10 mỗi account-day có dư nợ và đang ACTIVE. Pilot cho thấy 0.05 làm tỷ trọng `lu` quá thấp; 0.10 cải thiện vòng đời vay/trả mà không đổi logic nhãn. Phân phối repayment_ratio vẫn là Normal(0.15, 0.05).
+
 Repayment không phụ thuộc vào việc tài khoản có BUY trong 7 ngày hay không. Với mỗi account-day, kể cả ngày không giao dịch:
 
 ```text
-p_repayment_day = repayment_probability_if_debt (0.05) nếu status_at_day = ACTIVE và margin_debt_before_day > 0
+p_repayment_day = repayment_probability_if_debt (0.10) nếu status_at_day = ACTIVE và margin_debt_before_day > 0
                   0.00 trong mọi trường hợp khác
 ```
 
@@ -624,6 +626,8 @@ Event tại `report_date`, event bị `CANCELLED`, event sai tổ hợp hoặc e
 
 ## 12. Feature contract và chống leakage
 
+Cập nhật phạm vi Ngày 4: bỏ feature tùy chọn `days_since_last_margin_event` khỏi MVP. Lịch sử event vẫn được dùng nội bộ để xác định `nu/lu/au`. Snapshot được chốt cuối ngày; quy tắc segment đầu ngày trong generator không thay thế segment cuối ngày của feature snapshot.
+
 Feature tại `report_date` chỉ đọc dữ liệu:
 
 ```text
@@ -640,7 +644,7 @@ total_trading_amount_7d, total_trading_amount_30d,
 active_trading_days_30d, margin_debt, margin_limit,
 margin_utilization_ratio, debt_change_7d, cash_balance,
 asset_value, collateral_value, cash_to_asset_ratio,
-NAV, days_since_last_margin_event, margin_segment
+NAV, margin_segment
 ```
 
 Công thức:
@@ -803,7 +807,6 @@ asset_value: int64
 collateral_value: int64
 cash_to_asset_ratio: float64
 NAV: int64
-days_since_last_margin_event: int64
 loan_label_next: int8 {0, 1}
 split: enum(train, validation, test)
 ```
@@ -811,12 +814,11 @@ split: enum(train, validation, test)
 ## 16. Cấu trúc output và metadata
 
 ```text
-data/raw/customer_account.parquet
-data/raw/stock_transaction.parquet
-data/raw/margin_balance_daily.parquet
-data/raw/margin_cash_flow.parquet
-data/features/training_dataset.parquet
-data/metadata/generation_run.json
+data/generated/day4_v2/                         # source Parquet
+data/warehouse_full/raw_day4_v2/                # source Iceberg
+data/features/day4_runs/<run_id>/               # fs_* và training_dataset.parquet
+data/warehouse_full/features_<run_id>/          # feature Iceberg
+data/catalog_full/pyiceberg.db                  # catalog
 ```
 
 Partition:

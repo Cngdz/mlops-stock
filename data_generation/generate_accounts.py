@@ -42,19 +42,21 @@ def generate_accounts(
     for index in range(1, num_accounts + 1):
         rng = np.random.default_rng(np.random.SeedSequence([seed, index]))
         account = f"{index:010d}"
-        # Open dates are restricted to the first 60 days, giving every account
-        # enough warm-up history for the daily snapshot stage.
-        open_date = raw_start + timedelta(days=int(rng.integers(0, 60)))
+        open_date = raw_start + timedelta(days=int(rng.integers(0, 31)))
         status = _choice(rng, ["ACTIVE", "DORMANT", "CLOSED"], [0.95, 0.04, 0.01])
         close_date: date | None = None
         dormant_date: date | None = None
         if status == "CLOSED":
-            close_date = open_date + timedelta(days=int(rng.integers(60, 300)))
+            close_date = date(raw_start.year, 10, 1) + timedelta(days=int(rng.integers(0, 61)))
             close_date = min(close_date, raw_end)
         elif status == "DORMANT":
-            dormant_date = open_date + timedelta(days=int(rng.integers(60, 240)))
+            dormant_date = date(raw_start.year, 9, 1) + timedelta(days=int(rng.integers(0, 91)))
             dormant_date = min(dormant_date, raw_end)
 
+        archetype = int(rng.choice(3, p=[0.45, 0.30, 0.25]))
+        trading_beta = [(2.0, 5.0), (2.5, 4.0), (3.0, 3.0)][archetype]
+        margin_beta = [(1.5, 8.0), (3.0, 5.0), (6.0, 3.0)][archetype]
+        risk_beta = [(2.0, 5.0), (3.0, 4.0), (4.0, 3.0)][archetype]
         rows.append(
             {
                 "master_account": account,
@@ -68,10 +70,10 @@ def generate_accounts(
                 # Latent variables are retained in the Silver account table;
                 # downstream Gold features must not expose them.
                 "wealth_level": float(rng.beta(2.5, 2.5)),
-                "trading_propensity": float(rng.beta(2.0, 3.0)),
-                "margin_affinity": float(rng.beta(2.0, 4.0)),
-                "risk_appetite": float(rng.beta(2.0, 3.0)),
-                "activity_stability": float(rng.beta(3.0, 2.0)),
+                "trading_propensity": float(rng.beta(*trading_beta)),
+                "margin_affinity": float(rng.beta(*margin_beta)),
+                "risk_appetite": float(rng.beta(*risk_beta)),
+                "activity_stability": float(rng.beta(4.0, 2.0)),
             }
         )
 
@@ -96,4 +98,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -44,7 +44,7 @@
     | --- | --- |
     | `fs_demographic` | `account_age_days`, loại tài khoản |
     | `fs_trading_behavior` | `total_trading_amount_7d/30d`, `trade_count_30d` |
-    | `fs_margin_balance` | `margin_total`, `margin_utilization_ratio` |
+    | `fs_margin_balance` | `margin_debt`, `margin_utilization_ratio` |
     | `fs_asset_balance` | `cash_balance`, NAV |
     
     ### 3.4 Quy mô & split
@@ -53,7 +53,7 @@
     - Time-based split (train/validation/test theo thời gian, không random split) để tránh leakage.
     - Point-in-time correctness: feature tại thời điểm dự báo không được chứa dữ liệu phát sinh sau đó.
     
-    [TODO] Bổ sung schema chi tiết (kiểu dữ liệu, đơn vị) và số dòng thực tế sau khi sinh dữ liệu.
+    Output hiện tại gồm `fs_*` và `training_dataset` với time-based train/validation/test split và embargo 30 ngày.
     
     ## 4. Solution
     
@@ -388,14 +388,14 @@
     
     **Làm:**
     
-    - Viết pipeline tính 4-5 nhóm feature (`fs_demographic`, `fs_trading_behavior`, `fs_margin_balance`, `fs_asset_balance`).
-    - Định nghĩa `loan_label_next` theo logic event-based (window 30 ngày, report_date+1 → report_date+30), đảm bảo không leak dữ liệu tương lai. Thêm bước sanity-check: tính tỷ lệ positive rate cho từng phân khúc (nu/lu/au) sau khi gán label, đảm bảo đủ để ROC-AUC/Recall có ý nghĩa (không quá 0% hoặc quá 100%).
-    - Thêm data quality check thủ công (null, range) thay Great Expectations.
-    - Chốt chiến lược xử lý mất cân bằng nhãn (class weight).
+    - Xây dựng feature snapshot theo bốn nhóm: `fs_demographic`, `fs_trading_behavior`, `fs_margin_balance`, `fs_asset_balance`.
+    - Tạo `loan_label_next` theo cửa sổ 30 ngày sau `report_date`, đúng logic nghiệp vụ Margin MBS/MBLink và bảo đảm point-in-time, không leakage.
+    - Chạy data-quality gate, kiểm tra positive rate theo `nu/lu/au`, và chốt cách xử lý mất cân bằng nhãn.
+    - Chuẩn bị time-based train/validation/test split với embargo 30 ngày.
     
-    **Học:** Rolling window aggregation (7d/30d) bằng pandas hoặc DuckDB SQL, kỹ thuật tránh leakage khi tính label.
+    **Học:** Rolling window aggregation, point-in-time correctness, event-based labeling và xử lý class imbalance.
     
-    **Deliverable:** Bảng `fs_*` ghi vào Iceberg, có label, split train/val/test theo thời gian.
+    **Deliverable:** Bốn bảng `fs_*` trên Iceberg, `training_dataset` có label và split, class weights và báo cáo chất lượng; chỉ dùng training khi quality gate đạt.
     
     ---
     
@@ -410,9 +410,6 @@
     **Học:** Feast concepts (Entity/FeatureView/OfflineStore/OnlineStore), cách viết custom offline store nếu Feast không hỗ trợ sẵn DuckDB (kiểm tra trước — nếu tốn quá nửa ngày để viết custom provider, fallback: dùng Feast **File offline store** trỏ vào Parquet export từ Iceberg, đơn giản hơn nhiều).
     
     **Deliverable:** Historical feature retrieval chạy được, online feature trong Redis truy vấn được.
-    
-    > ⚠️ Điểm rủi ro nhất trong cả kế hoạch — nếu đến 12h trưa vẫn chưa chạy được custom offline store, chuyển ngay sang fallback File offline store để không mất cả ngày.
-    > 
     
     ---
     

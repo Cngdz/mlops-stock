@@ -384,7 +384,8 @@ Ví dụ feature:
 | Margin | `margin_utilization_ratio` | Số dư tại `report_date` |
 | Margin | `debt_change_7d` | So sánh dư nợ trong 7 ngày |
 | Asset | `cash_balance`, `NAV` | Số dư tại `report_date` |
-| History | `days_since_last_margin_event` | Chỉ các event trước hoặc tại `report_date` |
+
+Ngày 4 không yêu cầu feature `days_since_last_margin_event`; lịch sử event vẫn cần để xác định segment tại snapshot.
 
 Các cột sau không được làm input feature:
 
@@ -400,9 +401,10 @@ Split phải theo thời gian, không random toàn bộ dữ liệu.
 Ví dụ:
 
 ```text
-Train:      60% khoảng thời gian đầu
-Validation: 20% tiếp theo
-Test:       20% cuối cùng
+Train:      2025-02-01 .. 2025-06-30
+Validation: 2025-07-31 .. 2025-09-30
+Test:       2025-10-31 .. 2025-12-31
+Embargo:    30 ngày giữa các tập
 ```
 
 Khuyến nghị có embargo tối thiểu 30 ngày giữa các split nếu các cửa sổ label bị chồng lấn. Tài liệu kết quả phải ghi rõ mốc ngày của từng split.

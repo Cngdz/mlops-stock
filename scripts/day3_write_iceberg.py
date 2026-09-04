@@ -1,4 +1,5 @@
 from pathlib import Path
+import argparse
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,15 +24,15 @@ TABLE_NAMES = [
 
 
 def normalize_timestamp_precision(table: pa.Table) -> pa.Table:
-    """PyIceberg currently accepts microsecond, not nanosecond, timestamps."""
+    """Store aware timestamps as UTC microseconds without changing the instant."""
     fields = []
     changed = False
     for field in table.schema:
-        if pa.types.is_timestamp(field.type) and field.type.unit == "ns":
+        if pa.types.is_timestamp(field.type) and (field.type.unit != "us" or field.type.tz not in (None, "UTC")):
             fields.append(
                 pa.field(
                     field.name,
-                    pa.timestamp("us", tz=field.type.tz),
+                    pa.timestamp("us", tz="UTC" if field.type.tz else None),
                     nullable=field.nullable,
                     metadata=field.metadata,
                 )
@@ -44,7 +45,7 @@ def normalize_timestamp_precision(table: pa.Table) -> pa.Table:
         return table
 
     target_schema = pa.schema(fields, metadata=table.schema.metadata)
-    return table.cast(target_schema, safe=False)
+    return table.cast(target_schema, safe=True)
 
 
 def create_catalog():
@@ -64,15 +65,19 @@ def create_catalog():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Ingest sources into an explicit Iceberg namespace.")
+    parser.add_argument('--input-dir', type=Path, default=INPUT_DIR)
+    parser.add_argument('--namespace', default='raw')
+    args = parser.parse_args()
     catalog = create_catalog()
 
-    if not catalog.namespace_exists("raw"):
-        catalog.create_namespace("raw")
-        print("Created namespace: raw")
+    if not catalog.namespace_exists(args.namespace):
+        catalog.create_namespace(args.namespace)
+        print(f"Created namespace: {args.namespace}")
 
     for table_name in TABLE_NAMES:
-        identifier = f"raw.{table_name}"
-        parquet_path = INPUT_DIR / f"{table_name}.parquet"
+        identifier = f"{args.namespace}.{table_name}"
+        parquet_path = args.input_dir / f"{table_name}.parquet"
 
         if not parquet_path.exists():
             raise FileNotFoundError(parquet_path)
