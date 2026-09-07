@@ -8,8 +8,10 @@ import argparse
 from datetime import date, datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 import time
 
 import duckdb
@@ -25,6 +27,37 @@ GROUPS = {
     "fs_asset_balance": ["cash_balance", "asset_value", "collateral_value", "cash_to_asset_ratio", "NAV"],
 }
 SOURCE_KEYS = {"customer_account": ["master_account"], "stock_transaction": ["transaction_id"], "margin_balance_daily": ["master_account", "business_date"], "margin_cash_flow": ["cash_flow_id"]}
+SOURCE_SCHEMA = {
+    "customer_account": {
+        "master_account": "text", "account_open_date": "date", "account_status": "text",
+        "account_close_date": "date", "dormant_start_date": "date", "risk_profile": "text",
+    },
+    "stock_transaction": {
+        "transaction_id": "text", "master_account": "text", "transaction_time": "timestamp",
+        "quantity": "number", "price": "number", "trade_value": "number", "side": "text",
+    },
+    "margin_balance_daily": {
+        "master_account": "text", "business_date": "date", "cash_balance": "number",
+        "asset_value": "number", "margin_debt": "number", "margin_limit": "number",
+    },
+    "margin_cash_flow": {
+        "cash_flow_id": "text", "master_account": "text", "event_date": "date",
+        "status": "text", "fk_product": "text", "fk_cash_flow_type": "text",
+        "fk_deliver_type": "text", "amount": "number",
+    },
+}
+
+
+def schema_type_matches(actual, expected):
+    if expected == "number":
+        return actual.split("(")[0] in {
+            "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT",
+            "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT",
+            "FLOAT", "DOUBLE", "DECIMAL",
+        }
+    if expected == "timestamp":
+        return actual == "VARCHAR" or actual.startswith("TIMESTAMP")
+    return actual == {"text": "VARCHAR", "date": "DATE"}[expected]
 
 
 def catalog():
@@ -45,20 +78,42 @@ def records(con, sql):
 
 def validate_sources(con, raw_end):
     """Reject unsupported schemas and invalid source data before feature builds."""
-    columns = {r[0] for r in con.execute("DESCRIBE margin_cash_flow").fetchall()}
-    missing = sorted({"fk_cash_flow_type", "fk_deliver_type"} - columns)
+    available = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+    missing_tables = sorted(set(SOURCE_SCHEMA) - available)
+    missing_columns, invalid_types = {}, {}
+    for table, required in SOURCE_SCHEMA.items():
+        if table not in available:
+            continue
+        columns = dict((r[0], r[1]) for r in con.execute(f"DESCRIBE {table}").fetchall())
+        missing_columns[table] = sorted(set(required) - columns.keys())
+        invalid_types[table] = {
+            name: {"observed": columns[name], "expected": kind}
+            for name, kind in required.items()
+            if name in columns and not schema_type_matches(columns[name], kind)
+        }
+    result = {
+        "status": "FAIL", "missing_tables": missing_tables,
+        "missing_columns": {k: v for k, v in missing_columns.items() if v},
+        "invalid_column_types": {k: v for k, v in invalid_types.items() if v},
+        "missing_cash_flow_columns": missing_columns.get("margin_cash_flow", []),
+        "invalid_transaction_timestamps": None,
+        "accounts_with_incomplete_balance_history": None,
+    }
+    if missing_tables or result["missing_columns"] or result["invalid_column_types"]:
+        return result
     invalid_times = scalar(con, "SELECT count(*) FROM stock_transaction WHERE TRY_CAST(transaction_time AS TIMESTAMPTZ) IS NULL")
     incomplete = con.execute("""SELECT count(*) FROM (
         SELECT a.master_account FROM customer_account a LEFT JOIN margin_balance_daily b USING(master_account)
-        GROUP BY a.master_account,a.account_open_date HAVING min(b.business_date)<>a.account_open_date
-        OR max(b.business_date)<>? OR count(DISTINCT b.business_date)<>date_diff('day',a.account_open_date,?)+1)""",
+        GROUP BY a.master_account,a.account_open_date HAVING a.account_open_date IS NULL
+        OR min(b.business_date) IS DISTINCT FROM a.account_open_date
+        OR max(b.business_date) IS DISTINCT FROM ? OR count(DISTINCT b.business_date)<>date_diff('day',a.account_open_date,?)+1)""",
         [raw_end, raw_end]).fetchone()[0]
-    return {
-        "status": "FAIL" if missing or invalid_times or incomplete else "PASS",
-        "missing_cash_flow_columns": missing,
+    result.update({
+        "status": "FAIL" if invalid_times or incomplete else "PASS",
         "invalid_transaction_timestamps": invalid_times,
         "accounts_with_incomplete_balance_history": incomplete,
-    }
+    })
+    return result
 
 
 def normalize(con):
@@ -170,7 +225,20 @@ def weights(con, approved):
 
 
 def write_json(path, obj):
-    path.write_text(json.dumps(obj, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    """Replace one JSON file atomically; keep the previous file on write failure."""
+    payload = json.dumps(obj, indent=2, ensure_ascii=False, default=str)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=f".{path.name}.", suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def run(args):
@@ -185,9 +253,12 @@ def run(args):
     source_namespace = args.source_namespace or (json.loads(source_pointer.read_text())['namespace'] if source_pointer.exists() else 'raw')
     source_versions = {}
     for name in SOURCE_KEYS:
+        if not cat.table_exists(f"{source_namespace}.{name}"):
+            continue  # validate_sources reports missing tables without a SQL bind error.
         table = cat.load_table(f"{source_namespace}.{name}")
-        source_versions[name] = {"metadata": table.metadata_location, "snapshot_id": table.current_snapshot().snapshot_id}
-        con.register("source_arrow", table.scan().to_arrow())
+        snapshot = table.current_snapshot()
+        source_versions[name] = {"metadata": table.metadata_location, "snapshot_id": snapshot.snapshot_id if snapshot else None}
+        con.register("source_arrow", table.scan(snapshot_id=snapshot.snapshot_id if snapshot else None).to_arrow())
         con.execute(f"CREATE TABLE {name} AS SELECT * FROM source_arrow")
         con.unregister("source_arrow")
         print(f"Read {source_namespace}.{name}: {scalar(con, f'SELECT count(*) FROM {name}'):,}", flush=True)
@@ -235,9 +306,10 @@ def run(args):
     write_json(out / "class_weights.json", weight_result)
     report["elapsed_seconds"] = round(time.monotonic()-started, 2)
     write_json(out / "quality_report.json", report)
-    write_json(ROOT / "data/features/current.json", {"run_id": run_id, "path": str(out), "namespace": namespace})
-    write_json(source_pointer, {'namespace': source_namespace, 'approved_by_day4_run': run_id})
     write_report(report, weight_result, out)
+    write_json(ROOT / "data/features/current.json", {"run_id": run_id, "path": str(out), "namespace": namespace,
+                                                   "source_namespace": source_namespace})
+    write_json(source_pointer, {'namespace': source_namespace, 'approved_by_day4_run': run_id})
     print(f"Quality gate: {report['status']}; artifacts: {out}", flush=True)
     con.close()
     return 0
@@ -264,7 +336,7 @@ def write_report(report, weight_result, out):
         "## Thay đổi đã được người dùng duyệt", "",
         "Xác suất trả nợ tăng từ 5% lên 10%/ngày khi ACTIVE và có dư nợ; đã cập nhật decision §8.5 cùng các cấu hình tương ứng.",
         "Giữ nguyên định nghĩa label và toàn bộ ngưỡng quality gate. Calibration chỉ điều chỉnh xác suất sinh event, không thay nhãn sau khi sinh.",
-        "Pilot 500 tài khoản, seed 42; kết quả calibration và lịch sử các vòng ở data/generation_calibration.json. Metadata của nguồn mới nằm tại data/generated/day4_v2/generation_run.json.", "",
+        "Metadata/snapshot ID của chính nguồn được kiểm tra nằm trong quality_report.json. Tham số generator và calibration cần đối chiếu với generation_run.json của lần sinh nguồn tương ứng; báo cáo này không suy đoán từ tên thư mục.", "",
         "## Feature và nhãn", "",
         "Mỗi dòng có khóa (master_account, report_date). Bảng fs_* không chứa label; training_dataset gồm feature, segment, loan_label_next và split.",
         "Feature chỉ dùng dữ liệu đến cuối ngày D; cửa sổ 7 ngày là D−6..D, 30 ngày là D−29..D.",
@@ -316,7 +388,7 @@ def write_report(report, weight_result, out):
         "PASS áp dụng cho quality gate ngày 4. Tỷ trọng segment đã đạt ngưỡng tối thiểu; chưa khớp các mục tiêu tham khảo nu=35–55%, lu=20–40%, au=15–35% trong decision §10.",
         "Chưa nghiệm thu mục tiêu thống kê bổ sung như số giao dịch/tháng. Chưa train model (ngày 6), chưa đánh giá hiệu quả kinh doanh trên dữ liệu thật.",
         "Nguồn không có ingestion timestamp nên kiểm thử point-in-time hiện bao phủ event time, chưa bao phủ late-arriving data trong production.",
-        "Nguồn cũ raw và data/generated/full được giữ để đối chiếu; pipeline mặc định đã chuyển sang nguồn mới. Báo cáo day4_quality_history.json là lịch sử của các output lỗi đã xóa.", "",
+        "Các đường dẫn trong báo cáo thuộc môi trường tạo run. Khi chuyển máy, cần ingest lại dữ liệu và tạo run mới; không suy ra trạng thái hiện tại chỉ từ một báo cáo lịch sử.", "",
         "## Chạy lại", "", "```powershell",
         ".\\.venv\\Scripts\\python.exe -m unittest discover -s tests -v",
         ".\\.venv\\Scripts\\python.exe scripts/day4_feature_engineering.py",

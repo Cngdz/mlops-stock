@@ -1,7 +1,7 @@
 [project]
 name = "mlops"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reproducible synthetic margin propensity pipeline with Iceberg, point-in-time features, and quality gates"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

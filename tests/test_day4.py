@@ -1,8 +1,14 @@
 """Boundary fixtures independently specify windows, segments and leakage behavior."""
 import unittest
 from datetime import date
+import argparse
+import json
+from pathlib import Path
+import tempfile
+from unittest.mock import Mock, patch
 import duckdb
-from scripts.day4_feature_engineering import build, normalize, validate_sources, weights, GROUPS
+from scripts import day4_feature_engineering as pipeline
+from scripts.day4_feature_engineering import build, normalize, validate_sources, weights, write_json, GROUPS
 
 
 def fixture():
@@ -38,6 +44,77 @@ def fixture():
 
 
 class Day4Tests(unittest.TestCase):
+    def test_source_schema_errors_are_reported_before_sql(self):
+        cases = [
+            ("DROP TABLE stock_transaction", "missing_tables", "stock_transaction"),
+            ("ALTER TABLE margin_balance_daily DROP COLUMN cash_balance", "missing_columns", "margin_balance_daily"),
+            ("ALTER TABLE customer_account ALTER COLUMN account_open_date TYPE VARCHAR", "invalid_column_types", "customer_account"),
+            ("ALTER TABLE margin_cash_flow ALTER COLUMN amount TYPE VARCHAR", "invalid_column_types", "margin_cash_flow"),
+        ]
+        for sql, field, table in cases:
+            with self.subTest(sql=sql), fixture() as c:
+                c.execute(sql)
+                result = validate_sources(c, date(2026, 1, 30))
+                self.assertEqual(result["status"], "FAIL")
+                self.assertIn(table, result[field])
+                self.assertIsNone(result["invalid_transaction_timestamps"])
+
+    def test_missing_balance_history_and_null_open_date_are_rejected(self):
+        for sql in ["DELETE FROM margin_balance_daily WHERE master_account='A'",
+                    "UPDATE customer_account SET account_open_date=NULL WHERE master_account='A'"]:
+            with self.subTest(sql=sql), fixture() as c:
+                c.execute(sql)
+                result = validate_sources(c, date(2026, 1, 30))
+                self.assertEqual(result["status"], "FAIL")
+                self.assertEqual(result["accounts_with_incomplete_balance_history"], 1)
+
+    def test_rejected_runs_do_not_publish_artifacts_or_change_pointers(self):
+        for broken_schema in [True, False]:
+            with self.subTest(broken_schema=broken_schema), tempfile.TemporaryDirectory() as directory, fixture() as c:
+                root = Path(directory)
+                (root / "scripts").mkdir()
+                (root / "scripts/day4_features.sql").write_text(
+                    (pipeline.ROOT / "scripts/day4_features.sql").read_text(encoding="utf-8"), encoding="utf-8")
+                (root / "data/features").mkdir(parents=True)
+                pointer = root / "data/features/current.json"
+                pointer.write_text('{"run_id": "previous"}', encoding="utf-8")
+                source_pointer = root / "data/source_current.json"
+                source_pointer.write_text('{"namespace": "previous"}', encoding="utf-8")
+                if broken_schema:
+                    c.execute("ALTER TABLE margin_balance_daily DROP COLUMN cash_balance")
+                cat = Mock()
+                tables = {}
+                for name in pipeline.SOURCE_KEYS:
+                    table = Mock()
+                    table.metadata_location = f"{name}.metadata.json"
+                    table.current_snapshot.return_value.snapshot_id = 123
+                    table.scan.return_value.to_arrow.return_value = c.execute(f"SELECT * FROM {name}").to_arrow_table()
+                    tables[f"test_source.{name}"] = table
+                cat.load_table.side_effect = tables.__getitem__
+                cat.table_exists.side_effect = lambda name: name in tables
+                with patch.object(pipeline, "ROOT", root), patch.object(pipeline, "catalog", return_value=cat):
+                    status = pipeline.run(argparse.Namespace(source_namespace="test_source", raw_end=date(2026, 1, 30)))
+                self.assertEqual(status, 2)
+                self.assertEqual(json.loads(pointer.read_text())["run_id"], "previous")
+                self.assertEqual(json.loads(source_pointer.read_text())["namespace"], "previous")
+                self.assertFalse((root / "data/features/day4_runs").exists())
+                cat.create_namespace.assert_not_called()
+                cat.create_table.assert_not_called()
+                report_name = "source_validation.json" if broken_schema else "rejected_quality_report.json"
+                self.assertEqual(json.loads((root / "data/features" / report_name).read_text())["status"], "FAIL")
+
+    def test_atomic_json_keeps_previous_pointer_on_replace_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "current.json"
+            write_json(path, {"run_id": "previous"})
+            with patch.object(pipeline.os, "replace", side_effect=OSError("disk failure")):
+                with self.assertRaises(OSError):
+                    write_json(path, {"run_id": "next"})
+            self.assertEqual(json.loads(path.read_text()), {"run_id": "previous"})
+            self.assertEqual(list(Path(directory).iterdir()), [path])
+            write_json(path, {"run_id": "next"})
+            self.assertEqual(json.loads(path.read_text()), {"run_id": "next"})
+
     def test_mblink_and_invalid_event_combinations(self):
         c = fixture()
         c.execute("DELETE FROM margin_cash_flow")

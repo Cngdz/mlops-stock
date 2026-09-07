@@ -64,44 +64,48 @@ def create_catalog():
     )
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Ingest sources into an explicit Iceberg namespace.")
-    parser.add_argument('--input-dir', type=Path, default=INPUT_DIR)
-    parser.add_argument('--namespace', default='raw')
-    args = parser.parse_args()
-    catalog = create_catalog()
+def ingest_sources(catalog, input_dir: Path, namespace: str):
+    """Preflight the complete source batch before creating any table.
 
-    if not catalog.namespace_exists(args.namespace):
-        catalog.create_namespace(args.namespace)
-        print(f"Created namespace: {args.namespace}")
+    A reused namespace could mix two generator runs. Refuse all collisions,
+    including an incomplete previous attempt; the caller must choose a new name.
+    """
+    paths = {name: input_dir / f"{name}.parquet" for name in TABLE_NAMES}
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Missing source files: {missing}")
+    if catalog.namespace_exists(namespace):
+        existing = [f"{namespace}.{name}" for name in TABLE_NAMES
+                    if catalog.table_exists(f"{namespace}.{name}")]
+        if existing:
+            raise FileExistsError(f"Use a new namespace; source tables already exist: {existing}")
+    # Read every footer up front so a missing/corrupt schema cannot create a partial batch.
+    for path in paths.values():
+        schema = pq.read_schema(path)
+        normalize_timestamp_precision(pa.Table.from_batches([], schema=schema))
 
-    for table_name in TABLE_NAMES:
-        identifier = f"{args.namespace}.{table_name}"
-        parquet_path = args.input_dir / f"{table_name}.parquet"
+    if not catalog.namespace_exists(namespace):
+        catalog.create_namespace(namespace)
+        print(f"Created namespace: {namespace}")
 
-        if not parquet_path.exists():
-            raise FileNotFoundError(parquet_path)
-
+    for table_name, parquet_path in paths.items():
+        identifier = f"{namespace}.{table_name}"
         arrow_table = normalize_timestamp_precision(pq.read_table(parquet_path))
-
-        if catalog.table_exists(identifier):
-            # Không append lại để tránh nhân đôi dữ liệu khi chạy lại script.
-            print(f"Skipped existing table: {identifier}")
-            continue
-
         iceberg_table = catalog.create_table(
             identifier=identifier,
             schema=arrow_table.schema,
             properties={"format-version": "2"},
         )
-
         iceberg_table.append(arrow_table)
+        print(f"Created {identifier}: {arrow_table.num_rows:,} rows, {arrow_table.num_columns} columns")
 
-        print(
-            f"Created {identifier}: "
-            f"{arrow_table.num_rows:,} rows, "
-            f"{arrow_table.num_columns} columns"
-        )
+
+def main():
+    parser = argparse.ArgumentParser(description="Ingest sources into an explicit Iceberg namespace.")
+    parser.add_argument('--input-dir', type=Path, default=INPUT_DIR)
+    parser.add_argument('--namespace', default='raw')
+    args = parser.parse_args()
+    ingest_sources(create_catalog(), args.input_dir, args.namespace)
 
 
 if __name__ == "__main__":
