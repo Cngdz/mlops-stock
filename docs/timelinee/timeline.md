@@ -220,6 +220,8 @@
     **Học:** MLflow Model Registry alias API (phiên bản MLflow gần đây dùng alias thay stage), viết unit test cho logic quyết định.
     
     **Deliverable:** MLflow có ≥2 model version, hàm promotion có unit test pass.
+
+    **Kết quả 14/10/2026:** `training/promotion.py` (gate thuần), `registry.py` (log run, đăng ký `<usecase>_<segment>` kèm signature, `@staging`, tag kết quả gate), `promote.py` (bước duyệt, chỉ lệnh `--approve` mới gán `@production`), `--train-cutoff-days` cho backtest. **Điều chỉnh so với spec:** challenger và `@production` được chấm trên cùng tập test; recall so ở cùng tỷ lệ cảnh báo (tỷ lệ dòng `@production` gắn cờ tại ngưỡng của nó), vì ngưỡng max-F1 mỗi bản tự chọn làm recall dao động mạnh ở phân khúc ít dương (overdue `lu`: 0.27 vs 0.47 theo ngưỡng riêng, 0.51 vs 0.47 ở cùng tỷ lệ cảnh báo 14.9%). Model đầu tiên: AUC test ≥ 0.55. Backtest: −80 ngày → loan FAIL (`lu` AUC 0.518), duyệt bị từ chối; −40 ngày → BASELINE_PASS cả 3 use case, duyệt thành `@production`; đầy đủ → PASS cả 3, chờ duyệt. Registry có 2–4 version mỗi model. `tests/test_promotion.py` 15 test PASS. Hạ tầng: MLflow nâng lên 3.15.2 (chart 1.11.6), MinIO dùng image local, runbook `infra/README.md`.
     
     ---
     

@@ -56,6 +56,19 @@ def load_frame(run_dir: Path, uc: UseCase) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def cut_train(df: pd.DataFrame, days: int) -> pd.DataFrame:
+    """Backtest: pretend training happened `days` earlier by dropping the last `days` of the train
+    window. Validation and test stay identical, so versions trained at different cutoffs compare fairly."""
+    if days <= 0:
+        return df
+    dates = pd.to_datetime(df["report_date"])
+    train = df["split"] == "train"
+    cutoff = dates[train].max() - pd.Timedelta(days=days)
+    if cutoff < dates[train].min():
+        raise ValueError(f"train cutoff of {days} days removes the whole train window")
+    return df[~train | (dates <= cutoff)].reset_index(drop=True)
+
+
 def segment_weights(class_weights: dict, uc: UseCase, segment: str | None) -> dict[int, float]:
     node = class_weights
     for key in uc.class_weights.split("."):

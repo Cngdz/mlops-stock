@@ -1,11 +1,15 @@
-"""Day 6: train LR baseline + LightGBM per (use case, segment) on an approved Day 4 run.
+"""Day 6-7: train LR baseline + LightGBM per (use case, segment) on an approved Day 4 run.
 
 Usage:  python -m training.train                                 # all use cases, run in current.json
         python -m training.train --usecase loan_propensity --run-dir data/features/day4_runs/<id>
+        python -m training.train --usecase loan_propensity --train-cutoff-days 80   # backtest
+        python -m training.train --no-mlflow                     # Day 6 mode, no MLflow server needed
 
 Writes data/models/day6_runs/<train_run_id>/<usecase>/<segment>/{lr,lgbm}.joblib + metrics.json,
 and summary.json with lineage. Model choice (higher validation ROC-AUC) and threshold use validation
-only; test is scored once for the report. Day 7 consumes SegmentResult to log to MLflow.
+only; test is scored once for the report. With MLflow (default) the selected model of each segment is
+registered as <usecase>_<segment> with alias @staging and the promotion gate result as version tags;
+@production is set only by `python -m training.promote --approve`.
 """
 from __future__ import annotations
 
@@ -23,7 +27,7 @@ import joblib
 from sklearn.pipeline import Pipeline
 
 from training.config import UseCase, load_usecases
-from training.data import ROOT, SegmentData, check_run, iter_segments, load_frame, resolve_run_dir
+from training.data import ROOT, SegmentData, check_run, cut_train, iter_segments, load_frame, resolve_run_dir
 from training.evaluate import choose_threshold, metrics
 from training.models import fit_lgbm, fit_lr
 
@@ -84,7 +88,9 @@ def write_segment(out: Path, uc: UseCase, result: SegmentResult, lineage: dict) 
 
 
 def run(usecases: list[str] | None = None, run_dir: str | Path | None = None,
-        out_root: Path = OUT_ROOT, config: Path | None = None) -> Path:
+        out_root: Path = OUT_ROOT, config: Path | None = None,
+        track: bool = False, train_cutoff_days: int = 0) -> Path:
+    """track=True (Day 7): log to MLflow, register @staging versions and record the promotion gate."""
     all_usecases = load_usecases(config) if config else load_usecases()
     names = usecases or list(all_usecases)
     run_dir = resolve_run_dir(run_dir)
@@ -94,14 +100,19 @@ def run(usecases: list[str] | None = None, run_dir: str | Path | None = None,
     lineage = {
         "train_run_id": train_run_id, "feature_run_id": approved["run_id"],
         "feature_contract": approved["feature_contract"], "git_commit": git_commit(),
-        "python": platform.python_version(),
+        "train_cutoff_days": train_cutoff_days, "python": platform.python_version(),
         "libraries": {p: version(p) for p in ("scikit-learn", "lightgbm", "pandas", "numpy")},
     }
+    if track:
+        from training import registry
+        from training.promotion import load_gate_config
+        client, gate_cfg = registry.configure(), load_gate_config(config) if config else load_gate_config()
     summary = {**lineage, "usecases": {}}
     for name in names:
         uc = all_usecases[name]
-        df = load_frame(run_dir, uc)
+        df = cut_train(load_frame(run_dir, uc), train_cutoff_days)
         summary["usecases"][name] = {"seed": uc.seed, "feature_hash": uc.feature_hash(), "segments": {}}
+        challengers, champions, versions, notes = {}, {}, {}, {}
         for data in iter_segments(df, uc, approved["class_weights"]):
             result = train_segment(uc, data)
             write_segment(out_dir / name / data.segment, uc, result, lineage)
@@ -112,6 +123,18 @@ def run(usecases: list[str] | None = None, run_dir: str | Path | None = None,
                    for m, r in result.metrics.items()},
             }
             print_result(result)
+            if track:
+                (challengers[data.segment], champions[data.segment],
+                 notes[data.segment]) = registry.compare_with_champion(client, uc, data, result)
+                versions[data.segment] = registry.log_segment(uc, data, result, lineage)
+        if track:
+            decision = registry.gate_usecase(client, uc, challengers, champions, versions, gate_cfg)
+            summary["usecases"][name]["registered_versions"] = versions
+            summary["usecases"][name]["gate"] = {"status": decision.status, "reasons": decision.reasons,
+                                                 "champions": notes}
+            print(f"{name}: versions {versions} -> @staging, gate {decision.status}")
+            for segment, reason in decision.reasons.items():
+                print(f"    {segment}: {reason} [{notes[segment]}]")
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return out_dir
 
@@ -130,8 +153,12 @@ def main() -> None:
     parser.add_argument("--usecase", action="append", help="repeatable; default: all in usecases.yaml")
     parser.add_argument("--run-dir", help="Day 4 run dir; default: data/features/current.json")
     parser.add_argument("--out", type=Path, default=OUT_ROOT)
+    parser.add_argument("--no-mlflow", action="store_true", help="Day 6 mode: local artifacts only")
+    parser.add_argument("--train-cutoff-days", type=int, default=0,
+                        help="backtest: drop the last N days of the train window (e.g. 40, 80)")
     args = parser.parse_args()
-    out_dir = run(args.usecase, args.run_dir, args.out)
+    out_dir = run(args.usecase, args.run_dir, args.out, track=not args.no_mlflow,
+                  train_cutoff_days=args.train_cutoff_days)
     print(f"artifacts: {out_dir}")
 
 

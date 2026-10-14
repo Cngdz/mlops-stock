@@ -1,10 +1,18 @@
-# repositories:
-#   - name: bitnami
-#     url: https://charts.bitnami.com/bitnami
-#   - name: minio
-#     url: https://charts.min.io/
-#   - name: community-charts
-#     url: https://community-charts.github.io/helm-charts
+# MLOps platform: Postgres (MLflow backend), Redis (Feast online, phase 2), MinIO (artifacts), MLflow.
+# Bring-up and checks: see infra/README.md (bootstrap.ps1 -> port-forward.ps1 -> day1_verify.py).
+
+repositories:
+  - name: bitnami
+    url: https://charts.bitnami.com/bitnami
+  - name: minio
+    url: https://charts.min.io/
+  - name: community-charts
+    url: https://community-charts.github.io/helm-charts
+
+helmDefaults:
+  wait: true          # sync returns only when pods are Ready (MLflow 3 image is large: first pull takes minutes)
+  timeout: 1200
+  createNamespace: true
 
 releases:
   - name: postgres
@@ -26,11 +34,17 @@ releases:
     chart: minio/minio
     version: ~5.2.0
     values:
-      - ./helm-values/minio-values.yaml
+      - ./helm-values/minio-values.yaml   # image must be preloaded into kind, see the file header
 
   - name: mlflow
     namespace: mlops
     chart: community-charts/mlflow
-    version: ~0.7.0
+    # 1.11.6 = MLflow 3.15.2, same as the client in pyproject. 0.7.x shipped MLflow 2.1.1:
+    # no model aliases (@staging/@production) and no MLflow 3 logged-model API.
+    # Service port is 80 (chart 1.x), container port 5000.
+    version: 1.11.6
+    needs:            # backend DB and artifact bucket must exist before MLflow starts
+      - mlops/postgres
+      - mlops/minio
     values:
       - ./helm-values/mlflow-values.yaml

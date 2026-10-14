@@ -23,6 +23,15 @@ defaults:
     C: 1.0
     max_iter: 2000
 
+# Day 7 promotion gate, all-or-nothing across a use case's segments. The challenger and the current
+# @production model are scored on the SAME test rows; recall is compared at the same alert rate
+# (the share of rows @production flags at its own threshold). First version of a model (no @production yet):
+# test ROC-AUC must reach baseline_auc_floor, and promotion still needs `python -m training.promote`.
+promotion:
+  auc_tolerance: 0.03
+  recall_tolerance: 0.05
+  baseline_auc_floor: 0.55
+
 account_features: &account_features   # = Feast services loan_propensity / overdue_risk, minus margin_segment
   - account_age_days
   - trade_count_7d

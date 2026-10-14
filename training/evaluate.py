@@ -18,6 +18,17 @@ def choose_threshold(y, proba, rule: dict) -> float:
     return float(thresholds[ok[-1]]) if len(ok) else float(thresholds[0])
 
 
+def recall_at_alert_rate(y, proba, alert_rate: float) -> float:
+    """Recall when the model flags the top `alert_rate` share of rows. Lets two models with different
+    thresholds be compared at the same operating point (same number of alerts)."""
+    y = np.asarray(y)
+    k = int(round(alert_rate * len(y)))
+    if k == 0 or y.sum() == 0:
+        return 0.0
+    top = np.argsort(-np.asarray(proba), kind="stable")[:k]
+    return float(y[top].sum() / y.sum())
+
+
 def metrics(y, proba, threshold: float) -> dict:
     pred = (proba >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(y, pred, labels=[0, 1]).ravel()
