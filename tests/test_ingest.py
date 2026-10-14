@@ -46,8 +46,8 @@ class IngestTests(unittest.TestCase):
     def test_complete_batch_is_appended_once(self):
         ingest_sources(self.catalog, self.root, "raw_new")
         self.catalog.create_namespace.assert_called_once_with("raw_new")
-        self.assertEqual(self.catalog.create_table.call_count, 4)
-        self.assertEqual(self.catalog.create_table.return_value.append.call_count, 4)
+        self.assertEqual(self.catalog.create_table.call_count, len(TABLE_NAMES))
+        self.assertEqual(self.catalog.create_table.return_value.append.call_count, len(TABLE_NAMES))
 
     def test_real_sqlite_iceberg_roundtrip_and_retry(self):
         warehouse = self.root / "warehouse"

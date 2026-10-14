@@ -193,6 +193,98 @@ class Day4Tests(unittest.TestCase):
         self.assertFalse(result['approved_for_training'])
         c.close()
 
+    def test_overdue_label_is_new_overdue_among_eligible_rows(self):
+        c = fixture()
+        c.execute("ALTER TABLE margin_balance_daily ADD COLUMN margin_status VARCHAR DEFAULT 'NO_MARGIN'")
+        c.execute("UPDATE margin_balance_daily SET margin_status='OVERDUE' WHERE master_account='A' AND business_date='2025-02-01'")  # already overdue at D
+        c.execute("UPDATE margin_balance_daily SET margin_status='OVERDUE' WHERE master_account='B' AND business_date='2025-03-03'")  # D+30
+        c.execute("UPDATE margin_balance_daily SET margin_status='OVERDUE' WHERE master_account='C' AND business_date='2025-03-03'")  # no debt/history: not a candidate
+        c.execute("UPDATE margin_balance_daily SET margin_status='OVERDUE' WHERE master_account='D' AND business_date='2025-03-04'")  # D+31
+        normalize(c)
+        build(c, date(2026, 1, 30))
+        rows = c.execute("SELECT master_account,overdue_eligible,overdue_label_next_30d FROM candidate WHERE report_date='2025-02-01' ORDER BY 1").fetchall()
+        self.assertEqual(rows, [('A', 0, None), ('B', 1, 1), ('C', 0, None), ('D', 1, 0)])
+        c.close()
+
+    def test_over_limit_features_use_calendar_days_up_to_d(self):
+        c = fixture()
+        c.execute("UPDATE margin_balance_daily SET margin_debt=10,margin_limit=5 WHERE master_account='A' AND business_date BETWEEN '2025-01-30' AND '2025-02-01'")
+        c.execute("UPDATE margin_balance_daily SET margin_debt=10,margin_limit=5 WHERE master_account='A' AND business_date>'2025-02-01'")
+        normalize(c)
+        build(c, date(2026, 1, 30))
+        self.assertEqual(c.execute("SELECT over_limit_streak,over_limit_days_30d FROM candidate WHERE master_account='A' AND report_date='2025-02-01'").fetchone(), (3, 3))
+        c.close()
+
+    def campaign_fixture(self):
+        c = fixture()
+        c.execute("""CREATE TABLE customer_campaign(campaign_event_id VARCHAR,campaign_id VARCHAR,master_account VARCHAR,
+            sent_at TIMESTAMPTZ,channel VARCHAR,offer_type VARCHAR,interest_rate_offer DOUBLE,status VARCHAR)""")
+        c.execute("DELETE FROM margin_cash_flow WHERE master_account IN ('B','C')")
+        c.execute("""INSERT INTO margin_cash_flow VALUES
+            ('b1','B','2025-02-01','POSTED','MARGIN_MBS','INTERM_DELIVER','BUY_SHARE',10),
+            ('b2','B','2025-02-15','POSTED','MARGIN_MBS','INTERM_DELIVER','BUY_SHARE',10),
+            ('c1','C','2025-02-16','POSTED','MARGIN_MBS','INTERM_DELIVER','BUY_SHARE',10)""")
+        return c
+
+    def test_campaign_response_window_and_exclusions(self):
+        c = self.campaign_fixture()
+        for event, account, status in [('E1','A','DELIVERED'),('E2','B','DELIVERED'),('E3','C','DELIVERED'),('E4','D','FAILED')]:
+            c.execute("INSERT INTO customer_campaign VALUES (?,'MARGIN-01',?,TIMESTAMPTZ '2025-02-01 10:00:00+07','APP','RATE_DISCOUNT',0.07,?)", [event, account, status])
+        normalize(c)
+        build(c, date(2026, 1, 30))
+        rows = c.execute("SELECT master_account,campaign_response_label_14d FROM campaign_candidate ORDER BY 1").fetchall()
+        # A: no event in D+1..D+14. B: event on D is ignored, D+14 counts. C: D+15 is outside. D: FAILED is excluded.
+        self.assertEqual(rows, [('A', 0), ('B', 1), ('C', 0)])
+        c.close()
+
+    def test_campaign_history_excludes_the_current_send_and_inactive_accounts_are_dropped(self):
+        c = self.campaign_fixture()
+        c.execute("UPDATE customer_account SET dormant_start_date='2025-02-01',account_status='DORMANT' WHERE master_account='D'")
+        c.execute("INSERT INTO customer_campaign VALUES ('P1','MARGIN-01','A',TIMESTAMPTZ '2025-01-20 10:00:00+07','SMS','FEE_WAIVER',0.08,'DELIVERED')")
+        c.execute("INSERT INTO customer_campaign VALUES ('P2','MARGIN-01','A',TIMESTAMPTZ '2025-02-05 10:00:00+07','APP','LIMIT_BOOST',0.09,'DELIVERED')")
+        c.execute("INSERT INTO customer_campaign VALUES ('P3','MARGIN-01','D',TIMESTAMPTZ '2025-02-01 11:00:00+07','APP','LIMIT_BOOST',0.09,'DELIVERED')")
+        normalize(c)
+        build(c, date(2026, 1, 30))
+        self.assertEqual(c.execute("SELECT count(*) FROM campaign_candidate WHERE master_account='D'").fetchone()[0], 0)
+        self.assertEqual(c.execute("SELECT campaign_count_30d,days_since_last_campaign,has_campaign_history FROM campaign_candidate WHERE campaign_event_id='P2'").fetchone(), (1, 16, 1))
+        self.assertEqual(c.execute("SELECT count(*) FROM campaign_candidate WHERE campaign_event_id='P1'").fetchone()[0], 0)  # before 2025-02-01
+        c.close()
+
+
+    def test_scoring_features_cover_latest_and_embargo_days_without_labels(self):
+        c = fixture()
+        normalize(c)
+        build(c, date(2026, 1, 30))
+        cols = {r[0] for r in c.execute("DESCRIBE scoring_features").fetchall()}
+        self.assertFalse({"loan_label_next", "overdue_label_next_30d", "overdue_eligible", "split"} & cols)
+        self.assertEqual(c.execute("SELECT max(report_date) FROM scoring_features").fetchone()[0], date(2026, 1, 30))
+        # Embargo day and a day inside the last 30 days: scoring rows exist, training rows do not.
+        for day in ["2025-07-15", "2026-01-20"]:
+            self.assertEqual(c.execute("SELECT count(*) FROM scoring_features WHERE report_date=?", [day]).fetchone()[0], 4)
+            self.assertEqual(c.execute("SELECT count(*) FROM candidate WHERE report_date=?", [day]).fetchone()[0], 0)
+        c.close()
+
+    def test_training_features_equal_scoring_features_for_the_same_key(self):
+        c = fixture()
+        normalize(c)
+        build(c, date(2026, 1, 30))
+        feature_cols = [f for values in GROUPS.values() for f in values]
+        mismatch = c.execute("SELECT count(*) FROM candidate t JOIN scoring_features f USING(master_account,report_date) WHERE "
+                             + " OR ".join(f't."{k}" IS DISTINCT FROM f."{k}"' for k in feature_cols)).fetchone()[0]
+        missing = c.execute("SELECT count(*) FROM candidate t ANTI JOIN scoring_features f USING(master_account,report_date)").fetchone()[0]
+        self.assertEqual((mismatch, missing), (0, 0))
+        self.assertGreater(c.execute("SELECT count(*) FROM scoring_features").fetchone()[0], c.execute("SELECT count(*) FROM candidate").fetchone()[0])
+        c.close()
+
+    def test_scoring_features_ignore_data_after_d(self):
+        # Data up to T gives features at T, while labels only exist up to T-30.
+        c = fixture()
+        normalize(c)
+        build(c, date(2025, 3, 3))
+        self.assertEqual(c.execute("SELECT max(report_date) FROM scoring_features").fetchone()[0], date(2025, 3, 3))
+        self.assertEqual(c.execute("SELECT max(report_date) FROM candidate").fetchone()[0], date(2025, 2, 1))
+        c.close()
+
 
 if __name__ == '__main__':
     unittest.main()

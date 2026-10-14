@@ -9,17 +9,18 @@
     - **Đề tài**: Nghiên cứu và xây dựng nền tảng MLOps phục vụ phân tích và dự báo dữ liệu chứng khoán trong lĩnh vực ngân hàng, triển khai trên hạ tầng Kubernetes single-node (laptop).
     - **Mục tiêu**: Chứng minh khả năng thiết kế, tích hợp, vận hành một vòng đời Machine Learning hoàn chỉnh — có khả năng tái lập, quản lý phiên bản, tự động triển khai và tự phục hồi khi có drift — không chỉ dừng ở việc train một mô hình đơn lẻ.
     - **Phạm vi**:
-        - Trong phạm vi: feature store, experiment tracking, model registry với gated promotion, auto-deploy qua webhook, reconcile loop, batch + real-time serving qua FastAPI inference gateway, monitoring & self-healing retrain.
+        - Giai đoạn 1 (trong phạm vi hiện tại): feature store (offline), experiment tracking, model registry với gated promotion, auto-deploy qua webhook lên KServe, reconcile loop, rollback, batch predict, monitoring & self-healing retrain, cho ba use case `loan_propensity`, `overdue_risk`, `campaign_response` (use case phụ theo thứ tự ưu tiên trong timeline).
+        - Giai đoạn 2 (sau khi giai đoạn 1 bàn giao): real-time serving theo `master_account` qua FastAPI inference gateway, feature online (materialize sang Redis).
         - Ngoài phạm vi: streaming feature (Kafka/Spark), CI/CD build image riêng (Harbor/Kaniko/ArgoCD), distributed hyperparameter tuning, backup/registry GC vận hành trưởng thành — lý do cắt giảm: [xem mục 5, Solution/Approach].
-    - **Thời gian thực hiện: 2 tuần**
+    - **Thời gian thực hiện:** giai đoạn 1 là 2 tuần; giai đoạn 2 lên lịch sau.
     
     ## 2. Business Problem
     
-    - **Bài toán**: Dự báo xác suất một tài khoản chứng khoán phát sinh hoặc gia tăng nhu cầu sử dụng margin/MBLink trong 30 ngày tới.
+    - **Bài toán**: Xây dựng feature/data platform phục vụ nhiều use case trên cùng dữ liệu tài khoản, giao dịch và margin; use case chính là dự báo nhu cầu sử dụng margin/MBLink trong 30 ngày tới.
     - **Nhãn dự báo**: 
-    Nhãn dự báo: `loan_label_next` = 1 nếu tài khoản phát sinh ít nhất 1 sự kiện giải ngân mới trong 30 ngày tới (từ report_date+1 đến report_date+30), thỏa mãn một trong hai tổ hợp: (fk_product=MARGIN_MBS, fk_cash_flow_type=INTERM_DELIVER, fk_deliver_type=BUY_SHARE) HOẶC (fk_product=MBLINK, fk_cash_flow_type=TLO_DELIVER_CASH, fk_deliver_type=BUY); = 0 nếu ngược lại. Logic mirror theo `model_margin_propensity/features/label.py` của hệ thống production tham khảo, áp dụng trên dữ liệu synthetic được mở rộng để mô phỏng cấu trúc bảng cash-flow gốc (`agg_fact_ma_debt_cash_flow`).
+    `loan_label_next` là nhãn chính cho nhu cầu vay; `overdue_label_next_30d` dự báo trạng thái quá hạn trong 30 ngày; `campaign_response_label_14d` dự báo phản hồi sau lần gửi campaign trong 14 ngày. Các nhãn được tính từ tương lai và không được đưa vào feature.
     - **Giá trị nghiệp vụ**: Cho phép cá nhân hóa ưu đãi (lãi suất margin) đúng thời điểm khách hàng có nhu cầu, thay vì gửi thông báo đại trà.
-    - **Đối tượng dự báo**: 3 phân khúc khách hàng — `nu` (non-user), `lu` (từng dùng margin, hiện hết dư nợ), `au` (active user) — mỗi phân khúc có model riêng do hành vi khác biệt.
+    - **Các use case**: `loan_propensity` dùng `loan_label_next`; `overdue_risk` dùng `overdue_label_next_30d`; `campaign_response` dùng `campaign_response_label_14d`. Use case account-day vẫn có thể huấn luyện model riêng cho `nu/lu/au`.
     
     ## 3. Data
     
@@ -35,6 +36,10 @@
     | `stock_transaction` | Lịch sử giao dịch | `transaction_id`, `master_account`, `symbol`, `transaction_time`, loại mua/bán, khối lượng, giá trị |
     | `margin_balance_daily` | Số liệu margin theo ngày | `master_account`, `business_date`, dư nợ, hạn mức, giá trị tài sản, số dư tiền |
     | `margin_cash_flow` | Sự kiện giải ngân margin | `master_account`, `event_date`, `fk_product`, `fk_cash_flow_type`, `fk_deliver_type`, `amount` |
+    | `stock_price_daily` | Giá cổ phiếu theo ngày | `business_date`, `symbol`, `price` |
+    | `security_master` | Dimension mã cổ phiếu | `symbol`, ngành, thanh khoản, mức rủi ro |
+    | `portfolio_holding_daily` | Danh mục nắm giữ theo ngày | `master_account`, `business_date`, `symbol`, giá trị, tỷ trọng |
+    | `customer_campaign` | Lịch sử gửi ưu đãi | `campaign_event_id`, `master_account`, `sent_at`, loại offer, kênh |
     
     ### 3.3 Feature tables (`fs_*`, Iceberg — offline store)
     
@@ -46,6 +51,8 @@
     | `fs_trading_behavior` | `total_trading_amount_7d/30d`, `trade_count_30d` |
     | `fs_margin_balance` | `margin_debt`, `margin_utilization_ratio` |
     | `fs_asset_balance` | `cash_balance`, NAV |
+    | `fs_portfolio` | `portfolio_value`, `holding_symbol_count`, `portfolio_concentration` |
+    | `fs_campaign` | `campaign_count_30d`, `days_since_last_campaign` |
     
     ### 3.4 Quy mô & split
     
@@ -53,7 +60,7 @@
     - Time-based split (train/validation/test theo thời gian, không random split) để tránh leakage.
     - Point-in-time correctness: feature tại thời điểm dự báo không được chứa dữ liệu phát sinh sau đó.
     
-    Output hiện tại gồm `fs_*` và `training_dataset` với time-based train/validation/test split và embargo 30 ngày.
+    Output gồm shared `fs_*`, `training_dataset` cho các use case account-day và `campaign_training_dataset` cho grain campaign-event; tất cả dùng time-based split, point-in-time join và embargo phù hợp.
     
     ## 4. Solution
     
@@ -61,11 +68,11 @@
     
     1. Sinh dữ liệu synthetic + mô tả nghiệp vụ, ghi vào Iceberg.
     2. Xây dựng Feature Store (Feast: entity, data source, feature view).
-    3. Materialize feature offline → online (Redis) định kỳ.
-    4. Training pipeline: baseline (Logistic Regression) + model so sánh (LightGBM/XGBoost) cho từng phân khúc.
+    3. (Giai đoạn 2) Materialize feature offline → online (Redis) định kỳ.
+    4. Training pipeline theo cấu hình use case: các model dùng lại shared feature nhưng có label, dataset, metric và version riêng.
     5. Experiment tracking + model registry (MLflow), gán alias `@staging` trước, `@production` sau khi qua gate.
     6. Auto-deploy: webhook lắng nghe alias đổi → tạo/cập nhật KServe `InferenceService` trỏ thẳng `storageUri` của model (không build image riêng cho model runtime).
-    7. Batch predict hàng ngày (cảnh báo sớm qua drift proxy) + real-time serving cho client qua FastAPI inference gateway.
+    7. Batch predict hàng ngày (cảnh báo sớm qua drift proxy). Real-time serving cho client qua FastAPI inference gateway thuộc giai đoạn 2; giai đoạn 1 kiểm tra endpoint KServe nội bộ bằng feature vector mẫu.
     8. Monitoring: Evidently theo dõi drift, đánh giá tuần dựa trên ground truth thật, tự động trigger retrain khi cần.
     
     ## 5. Architecture
@@ -101,7 +108,7 @@
         
         ---
         
-        ## 2. Luồng Feature Materialization (`dag_feast_materialize_daily`)
+        ## 2. Luồng Feature Materialization (`dag_feast_materialize_daily`) — Giai đoạn 2
         
         **Mục đích nghiệp vụ**: đồng bộ giá trị feature mới nhất từ kho lưu trữ lớn (Iceberg) sang bộ nhớ nhanh (Redis), để API dự báo real-time trả lời trong dưới 10ms thay vì phải quét cả kho dữ liệu.
         
@@ -173,7 +180,7 @@
         
         ---
         
-        ## 5. Luồng Phục vụ Dự báo Real-time (Online Inference)
+        ## 5. Luồng Phục vụ Dự báo Real-time (Online Inference) — Giai đoạn 2
         
         **Mục đích nghiệp vụ**: khi khách hàng mở app, hệ thống trả về xác suất họ sẽ vay margin trong thời gian thực để app hiển thị ưu đãi cá nhân hóa.
         
@@ -243,10 +250,10 @@
         | Luồng | Trigger | Tần suất | Mục đích |
         | --- | --- | --- | --- |
         | 1. Feature pipeline | Lịch (Airflow) | Hàng đêm | Chuẩn hóa dữ liệu đặc trưng |
-        | 2. Materialization | Lịch (Airflow) | Hàng đêm | Đồng bộ tốc độ cho serving |
+        | 2. Materialization (GĐ2) | Lịch (Airflow) | Hàng đêm | Đồng bộ tốc độ cho serving |
         | 3. Training | Lịch hoặc trigger drift | Định kỳ / khi cần | Tạo model version mới, có gate |
         | 4. Auto-deploy | Sự kiện (alias đổi) | Bất kỳ lúc nào | Đưa model vào phục vụ tự động |
-        | 5. Real-time inference | Request từ client | Liên tục | Trả kết quả cho người dùng cuối |
+        | 5. Real-time inference (GĐ2) | Request từ client | Liên tục | Trả kết quả cho người dùng cuối |
         | 6. Batch predict + self-heal | Lịch (Airflow) | Hàng ngày | Chấm điểm hàng loạt + cảnh báo sớm |
         | 7. Weekly evaluate | Lịch (Airflow) | Hàng tuần | Đo chính xác thật, quyết định retrain |
         
@@ -282,7 +289,7 @@
     
     - **Nền tảng**: Kubernetes single-node (kind/minikube), Helm/Helmfile để triển khai.
     - **Serving**: KServe RawDeployment mode (không qua Knative/Istio) — giảm tải tài nguyên, phù hợp laptop; KServe nhận feature vector và thực hiện model inference.
-    - **Business API**: FastAPI inference gateway nhận `master_account`, truy vấn Feast Online Store/Redis, tính feature on-demand, chọn model theo phân khúc và gọi endpoint nội bộ của KServe.
+    - **Business API (giai đoạn 2)**: FastAPI inference gateway nhận `master_account`, truy vấn Feast Online Store/Redis, tính feature on-demand, chọn model theo phân khúc và gọi endpoint nội bộ của KServe.
     - **Auto-deploy**: MLflow webhook → FastAPI deployer → resolve `storageUri` → apply `InferenceService` CRD. Reconcile loop chạy mỗi 600s để tự sửa lệch trạng thái (idempotent).
     - **Orchestration**: Airflow standalone mode, các DAG: `feature_store_daily`, `feast_materialize_daily`, `iceberg_maintenance_weekly`, `<model>_train`, `<model>_predict`, `<model>_evaluate`.
     - **Tài nguyên ước tính**: ~4.5–5GB RAM cho toàn bộ hạ tầng (khuyến nghị laptop ≥16GB RAM).
@@ -302,10 +309,10 @@
     | `propensity_binary_pred` | Nhãn dự báo nhị phân |
     | `report_date` | Ngày chấm điểm |
     
-    ### 8.2 Real-time inference API
+    ### 8.2 Real-time inference API (giai đoạn 2)
     
     - **Client request**: `POST /v1/margin-propensity/predict` — payload `{ "master_account": "<id>" }`
-    - **Gateway-to-KServe request**: `POST /v2/models/<segment>/infer` — payload chứa feature vector theo model signature đã log trong MLflow.
+    - **Gateway-to-KServe request**: `POST /v2/models/<segment>/infer` — payload chứa feature vector theo model signature đã log trong MLflow; không chứa các cột nhãn.
     - **Client response**: `{ "score": 0.87, "segment": "high_propensity", "model_version": "<version>" }`
     - Payload inference **không được chứa** cột nhãn `loan_label_next`.
     - KServe endpoint là endpoint nội bộ; client không gọi trực tiếp KServe và không cần biết cấu trúc feature.
@@ -338,3 +345,7 @@
     ---
     
     ## 11. Hạn chế & Hướng phát triển
+
+    - **Giai đoạn 1 (hiện tại):** auto-deploy, reconcile loop và rollback lên KServe đã nằm trong phạm vi. Chưa có endpoint cho client theo `master_account`; endpoint KServe nội bộ được kiểm tra bằng feature vector mẫu.
+    - **Giai đoạn 2:** Feast online/Redis (luồng 2) và FastAPI gateway (luồng 5) cho cả ba use case, kèm đo latency end-to-end và kiểm thử Redis chưa materialize.
+    - **Hạn chế dữ liệu:** dữ liệu synthetic, nên metric không phản ánh hành vi khách hàng thật; hiệu ứng campaign là cài đặt thủ công trong generator.

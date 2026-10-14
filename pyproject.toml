@@ -8,6 +8,7 @@ dependencies = [
     "boto3>=1.43.81",
     "duckdb>=1.5.5",
     "faker>=40.37.0",
+    "feast>=0.66,<0.67",
     "mlflow>=3.15.2",
     "numpy>=2.5.2",
     "pandas>=2.3.3",

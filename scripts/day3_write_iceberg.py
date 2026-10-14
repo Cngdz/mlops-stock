@@ -17,9 +17,13 @@ WAREHOUSE = ROOT / "data" / "warehouse_full"
 
 TABLE_NAMES = [
     "customer_account",
+    "stock_price_daily",
+    "security_master",
     "stock_transaction",
+    "portfolio_holding_daily",
     "margin_balance_daily",
     "margin_cash_flow",
+    "customer_campaign",
 ]
 
 

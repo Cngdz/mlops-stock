@@ -14,9 +14,9 @@ Dữ liệu synthetic phải có quan hệ nghiệp vụ hợp lý, có tín hi�
 
 Phạm vi của tài liệu:
 
-- Bốn bảng dữ liệu nguồn ở Gold layer.
+- Các bảng dữ liệu nguồn ở Gold layer và nhiều training use case dùng chung feature.
 - Quy tắc tạo tài khoản, giao dịch, số dư margin và sự kiện giải ngân.
-- Quy tắc tạo `loan_label_next`.
+- Quy tắc tạo các nhãn `loan_label_next`, `overdue_label_next_30d` và `campaign_response_label_14d`.
 - Quy ước thời gian, khóa, kiểu dữ liệu và ràng buộc chất lượng.
 - Cách xuất dữ liệu Parquet để các pipeline pandas/DuckDB/Iceberg/Feast sử dụng.
 
@@ -297,6 +297,30 @@ Các event khác có thể được sinh để mô phỏng dữ liệu nghiệp 
 - Không sinh event hợp lệ cho tài khoản `nu` trước thời điểm nó chuyển sang trạng thái đã sử dụng margin.
 - Không tạo nhiều bản ghi trùng `cash_flow_id`.
 
+## 10A. Bảng mở rộng phục vụ nhiều use case
+
+Các bảng sau không chứa nhãn; chúng bổ sung feature dùng chung cho nhiều model:
+
+### 11.1 `security_master`
+
+Grain một dòng cho mỗi `symbol`, gồm `sector`, `exchange`, `liquidity_group`, `margin_eligible` và `risk_level`. `symbol` trong `stock_transaction` và `portfolio_holding_daily` phải tồn tại trong bảng này.
+
+### 11.2 `portfolio_holding_daily`
+
+Grain một dòng cho mỗi `(master_account, business_date, symbol)`, gồm `quantity`, `average_cost`, `market_value`, `unrealized_pnl` và `portfolio_weight`. Chỉ ghi các vị thế có số lượng dương; dữ liệu được tái dựng từ giao dịch và giá tại ngày đó.
+
+### 11.3 `customer_campaign`
+
+Grain một dòng cho mỗi lần gửi ưu đãi, gồm `campaign_event_id`, `campaign_id`, `master_account`, `sent_at`, `channel`, `offer_type`, `interest_rate_offer` và `status`. Bảng này không chứa kết quả phản hồi; response được tính thành nhãn trong cửa sổ tương lai. Campaign DELIVERED có hiệu ứng nhân quả lên xác suất giải ngân trong 14 ngày sau gửi (phụ thuộc loại ưu đãi, lãi suất ưu đãi, kênh và mức ưa margin ẩn), nên campaign phải được sinh cùng vòng lặp với giải ngân, không được sinh độc lập sau cùng. Chỉ gửi cho tài khoản đang ACTIVE, mỗi tài khoản khoảng 3–12 lần. Chi tiết trong `data_generation_decisions.md` §8.6.
+
+## 10B. Nhiều nhãn và use case
+
+- `loan_label_next`: event giải ngân hợp lệ trong D+1..D+30, dùng cho `loan_propensity`.
+- `overdue_label_next_30d`: tài khoản **bắt đầu** trạng thái `OVERDUE` trong D+1..D+30, dùng cho `overdue_risk`. Candidate chỉ gồm tài khoản có dư nợ hoặc lịch sử margin tại D và **không đang OVERDUE** tại D (dòng đang OVERDUE gần như chắc chắn vẫn OVERDUE nên không đại diện cho dự báo).
+- `campaign_response_label_14d`: event giải ngân hợp lệ trong D+1..D+14 sau một campaign `DELIVERED` gửi ngày D cho tài khoản ACTIVE, dùng cho `campaign_response`. Grain là campaign-event, không phải account-day. Dữ liệu phải chứa tín hiệu: response sau campaign cao hơn nền và khác nhau giữa các loại ưu đãi.
+
+Các model dùng lại feature account/trading/margin/portfolio trong Feature Store, nhưng có dataset, nhãn, metric, model version và monitoring riêng.
+
 ## 11. Thứ tự sinh dữ liệu
 
 Phải sinh theo thứ tự sau để đảm bảo khóa ngoại và quan hệ thời gian:
@@ -304,6 +328,7 @@ Phải sinh theo thứ tự sau để đảm bảo khóa ngoại và quan hệ t
 1. Sinh lịch ngày và universe mã cổ phiếu.
 2. Sinh `customer_account`.
 3. Sinh `stock_transaction` theo hoạt động của từng tài khoản.
+3b. Sinh `customer_campaign` trong cùng vòng lặp ngày; campaign DELIVERED làm tăng xác suất giải ngân trong 14 ngày sau đó (các bước 3, 3b, 4 và 5 thực chất chạy chung một state machine theo ngày).
 4. Sinh `margin_cash_flow` dựa trên giao dịch, tài sản và hành vi ẩn.
 5. Sinh `margin_balance_daily` từ trạng thái ban đầu, event và biến động tài sản.
 6. Tạo các `report_date` hợp lệ.
@@ -469,9 +494,13 @@ Nếu một segment có positive rate bằng 0% hoặc 100%, phải điều ch�
 data/
 ├── raw/
 │   ├── customer_account.parquet
+│   ├── stock_price_daily.parquet
+│   ├── security_master.parquet
 │   ├── stock_transaction.parquet
+│   ├── portfolio_holding_daily.parquet
 │   ├── margin_balance_daily.parquet
-│   └── margin_cash_flow.parquet
+│   ├── margin_cash_flow.parquet
+│   └── customer_campaign.parquet
 ├── snapshots/
 │   └── account_snapshots.parquet
 ├── features/
@@ -479,7 +508,10 @@ data/
 │   ├── fs_trading_behavior.parquet
 │   ├── fs_margin_balance.parquet
 │   ├── fs_asset_balance.parquet
-│   └── training_dataset.parquet
+│   ├── fs_portfolio.parquet
+│   ├── fs_campaign.parquet
+│   ├── training_dataset.parquet
+│   └── campaign_training_dataset.parquet
 └── metadata/
     └── generation_run.json
 ```
@@ -502,16 +534,19 @@ Parquet phải giữ đúng kiểu dữ liệu và tên cột ổn định để
 
 Bộ dữ liệu được coi là đạt khi:
 
-1. Có đủ bốn bảng nguồn Parquet.
-2. Có thể join bốn bảng theo `master_account`.
+1. Có đủ tám bảng nguồn Parquet.
+2. Có thể join các bảng account-day theo `master_account` và truy vết campaign-event độc lập.
 3. Không có khóa chính trùng hoặc khóa ngoại mồ côi.
-4. Có thể tái tính `loan_label_next` bằng query độc lập.
+4. Có thể tái tính cả ba nhãn bằng query độc lập.
 5. Có ít nhất hai class trong mỗi segment.
 6. Có train/validation/test split theo thời gian.
 7. Có báo cáo positive rate và phân phối chính.
 8. Có kiểm tra không leakage.
 9. Chạy lại cùng seed cho kết quả tái lập.
 10. Dataset đọc được bằng pandas và DuckDB trước khi ghi sang Iceberg.
+11. `overdue_risk` có candidate bỏ dòng đang OVERDUE và đạt ngưỡng positive rate.
+12. `campaign_response` đủ quy mô (tối thiểu 5.000 dòng mỗi split), có lift campaign và chênh lệch giữa các offer đo được.
+13. Portfolio được ghi nhận là nguồn độc lập với `asset_value`; không dùng làm proxy tài sản.
 
 ## 18. Nguyên tắc diễn giải kết quả
 

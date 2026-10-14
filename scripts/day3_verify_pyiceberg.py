@@ -22,9 +22,13 @@ print("Tables:", tables)
 
 expected = {
     "raw.customer_account",
+    "raw.stock_price_daily",
+    "raw.security_master",
     "raw.stock_transaction",
+    "raw.portfolio_holding_daily",
     "raw.margin_balance_daily",
     "raw.margin_cash_flow",
+    "raw.customer_campaign",
 }
 actual = {".".join(identifier) for identifier in tables}
 missing = expected - actual

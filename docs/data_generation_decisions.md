@@ -13,10 +13,22 @@ Nguyên tắc:
 - Thay một giá trị đã chốt phải tăng `generator_version` và ghi lý do.
 - Biến ẩn chỉ dùng để sinh dữ liệu, không xuất thành feature hoặc label.
 
+## 0.1 Thay đổi ở generator_version 0.2.0 (hỗ trợ ba use case)
+
+Lý do: rà soát dữ liệu `day4_v2` (2026-10-07) cho thấy hai use case phụ chưa học được gì có ý nghĩa.
+
+| # | Vấn đề đã đo | Quyết định |
+|---|---|---|
+| 1 | Campaign sinh sau events và độc lập với chúng: response rate 12,5–13,8% đều nhau giữa các `offer_type` | Campaign sinh **trong vòng lặp ngày**, có hiệu ứng nhân quả lên `p_margin_event` trong 14 ngày sau gửi (§8.6) |
+| 2 | Campaign ~2 mỗi tài khoản, chỉ 4.129/1.623/1.678 dòng train/val/test; có gửi cho tài khoản dormant/closed | 3–12 campaign mỗi tài khoản, chỉ gửi khi ACTIVE (§8.6) |
+| 3 | `overdue_label_next_30d`: dòng đang OVERDUE có nhãn dương 96,3%; 847k dòng không dư nợ chỉ 2,2% | Nhãn mới = **bắt đầu OVERDUE**, loại dòng đang OVERDUE; candidate chỉ gồm tài khoản có dư nợ hoặc lịch sử margin (§11.3) |
+| 4 | `portfolio_value / asset_value` trung vị ~2,1, có ngày `asset_value=0` nhưng còn holdings; ước tính ~19,6 triệu dòng holdings | Chốt chính sách đối soát và kích thước ở §9.2 |
+| 5 | Gate chưa có ngưỡng cho nhãn overdue và campaign | Thêm §14.5 |
+
 ## 1. Cấu hình chính đã chốt
 
 ```yaml
-generator_version: "0.1.0"
+generator_version: "0.2.0"
 seed: 42
 num_accounts: 5000
 timezone: "Asia/Ho_Chi_Minh"
@@ -111,6 +123,43 @@ margin_event_generation:
   fee_amount_max_vnd: 500000
   other_amount_min_vnd: 100000
   other_amount_max_vnd: 5000000
+
+campaign_generation:
+  enabled: true
+  stream: "campaign"
+  eligible_status: ACTIVE            # chỉ gửi khi ACTIVE tại ngày gửi
+  min_days_since_open: 30
+  last_send_offset_days: 14          # sent_date <= raw_end - 14 ngày
+  send_probability_base: 0.035       # 0.020 -> val 4.263 / test 3.707; 0.055 + cap 8 -> test 2.489 (cap cạn trước kỳ test); 0.035 + cap 12 để rải đều theo thời gian
+  send_probability_by_segment: {nu: 1.20, lu: 1.20, au: 0.60}   # nhân với base; segment đầu ngày
+  min_gap_days: 14                   # không gửi chồng cửa sổ phản hồi
+  max_campaigns_per_account: 12
+  delivered_probability: 0.96
+  send_time_local: "10:00-17:59"
+  channel: {APP: 0.50, SMS: 0.30, EMAIL: 0.20}
+  offer_type: {RATE_DISCOUNT: 0.40, FEE_WAIVER: 0.30, LIMIT_BOOST: 0.30}
+  interest_rate_offer: {min: 0.065, max: 0.105}
+  campaign_id_pool: 4                # MARGIN-01..MARGIN-04
+  response_window_days: 14
+
+campaign_uplift:                     # cộng vào logit p_margin_event, chỉ khi có campaign DELIVERED còn hiệu lực
+  active_from_day: 1                 # ngày t+1 sau ngày gửi t, khớp cửa sổ nhãn D+1..D+14
+  active_to_day: 14
+  offer_effect: {RATE_DISCOUNT: 0.60, LIMIT_BOOST: 0.45, FEE_WAIVER: 0.25}
+  rate_slope: 0.30                   # + 0.30 * (0.105 - interest_rate_offer) / 0.04
+  channel_effect: {APP: 0.15, SMS: 0.00, EMAIL: -0.10}
+  affinity_interaction: 0.80         # + 0.80 * margin_affinity
+  stack_rule: "most_recent_delivered_only"
+
+overdue_label:
+  definition: "new_overdue"          # xem §11.3
+  exclude_current_overdue: true
+  candidate_filter: "margin_debt>0 OR history_count>0"
+
+portfolio_generation:
+  reconcile_with_asset_value: false  # xem §9.2
+  frequency: daily
+  max_rows_warning: 25000000
 
 price_generation:
   initial_min: 10000
@@ -333,6 +382,7 @@ p_margin_event = sigmoid(
     + 0.60 * wealth_level
     + 0.40 * risk_appetite
     + segment_effect_margin[current_segment]
+    + campaign_logit_uplift          # §8.6; = 0 nếu không có campaign DELIVERED còn hiệu lực
     + day_noise_margin
 )
 ```
@@ -442,6 +492,44 @@ repayment_amount_effective = repayment_amount nếu status = POSTED, ngược l�
 
 Mỗi ngày tối đa một repayment event. Repayment dùng `margin_debt_before_day`, sau đó disbursement dùng hạn mức còn lại; không có vòng lặp giữa hai event.
 
+### 8.6 Campaign (mới ở 0.2.0)
+
+Campaign được sinh **bên trong state machine theo ngày**, không phải bảng sinh riêng sau cùng, vì cần chịu ảnh hưởng của segment và đồng thời ảnh hưởng ngược lên giải ngân.
+
+```text
+Với mỗi account-day (đầu ngày t):
+  điều kiện gửi: status = ACTIVE
+                 AND t >= account_open_date + 30
+                 AND t <= raw_end - 14
+                 AND không có campaign trong 14 ngày trước
+                 AND số campaign đã gửi < 8
+  p_send = 0.035 * send_probability_by_segment[segment đầu ngày]
+  nếu Bernoulli(p_send) = 1:
+      sent_at = ngày t, giờ ~ Uniform(10:00, 17:59) theo Asia/Ho_Chi_Minh
+      channel, offer_type, interest_rate_offer, campaign_id theo config
+      status = DELIVERED (0.96) hoặc FAILED (0.04)
+```
+
+Tác động lên giải ngân:
+
+```text
+nếu tồn tại campaign DELIVERED gửi ngày s với 1 <= t - s <= 14:
+    campaign_logit_uplift =
+        offer_effect[offer_type]
+      + 0.30 * (0.105 - interest_rate_offer) / 0.04
+      + channel_effect[channel]
+      + 0.80 * margin_affinity
+ngược lại: 0
+```
+
+Ràng buộc:
+
+- Campaign ngày `t` chỉ ảnh hưởng từ ngày `t+1`, nên không tạo rò rỉ vào feature cuối ngày `t` và khớp cửa sổ nhãn D+1..D+14.
+- Campaign `FAILED` không có uplift và không tính vào feature.
+- Nhắm campaign dùng segment đầu ngày (quan sát được), không dùng biến ẩn hay nhãn tương lai.
+- Seed theo stream `campaign` riêng (`[seed, account, 4]`): campaign không dùng chung RNG với stream `trading`, `cash` và `balance`. Ảnh hưởng của campaign lên giao dịch chỉ đi qua margin event → `segment` → xác suất giao dịch (có chủ đích, vì khách vay nhiều thì giao dịch nhiều). Vì vậy khi uplift = 0, bật hay tắt campaign cho cùng stream giao dịch; test: `test_zero_uplift_does_not_change_trading_stream`.
+- Hiệu ứng nhân quả phải đo được: lift response (có campaign / nền không campaign cùng segment) trong khoảng 1,2–2,5 (§14.5).
+
 ## 9. Sinh `margin_balance_daily`
 
 ### 9.1 Khởi tạo
@@ -456,11 +544,20 @@ margin_debt_0 = 0
 
 `asset_value` được định nghĩa là **giá trị thị trường của danh mục cổ phiếu, không bao gồm tiền mặt**. `cash_balance` là tiền mặt; `NAV` là tài sản ròng sau khi trừ dư nợ.
 
+**Chính sách portfolio (0.2.0, quyết định tạm thời):** `portfolio_holding_daily` là bản tái dựng từ giao dịch và giá, **không đối soát** với `asset_value` của `margin_balance_daily`. Đo thử trên 100 tài khoản cho thấy `portfolio_value / asset_value` có trung vị ~2,1 và có ngày `asset_value=0` nhưng vẫn có holdings. Vì vậy:
+
+- `asset_value` là NAV cổ phiếu mô phỏng của balance; `portfolio_value` là nguồn riêng. Không đưa cả hai vào cùng tập feature với ý nghĩa thay thế nhau.
+- `fs_portfolio` chỉ dùng cho cấu trúc danh mục (số mã, tập trung, lỗ chưa thực hiện, tỷ trọng mã rủi ro cao), không dùng `portfolio_value` làm proxy tài sản.
+- Quality gate không yêu cầu hai giá trị khớp nhau; ghi tỷ lệ trung vị vào report để minh bạch.
+- Cần xác nhận trước khi chạy: nếu muốn nhất quán hoàn toàn, tính `asset_value` từ holdings (đổi generator, phải calibrate lại).
+- Quy mô ước tính ~19,6 triệu dòng cho 5.000 tài khoản; giữ daily, partition theo `business_month`, cảnh báo khi vượt `max_rows_warning`.
+
 Mỗi ngày xử lý đúng thứ tự:
 
 ```text
 1. Carry-forward balance từ ngày trước
 2. Xác định status/segment đầu ngày từ dữ liệu đến ngày t-1
+2b. Sinh campaign opportunity (§8.6); uplift có hiệu lực từ ngày t+1
 3. Sinh market return và giá cổ phiếu
 4. Sinh stock transactions
 5. Tính trading activity 7d/30d
@@ -624,6 +721,35 @@ loan_label_next = 0 trong các trường hợp còn lại
 
 Event tại `report_date`, event bị `CANCELLED`, event sai tổ hợp hoặc event ngoài cửa sổ đều không tạo label dương.
 
+### 11.3 `overdue_label_next_30d` (định nghĩa lại ở 0.2.0)
+
+Định nghĩa cũ ("có OVERDUE trong D+1..D+30") bị loại vì dòng đang OVERDUE tại D có nhãn dương 96,3% (trạng thái kéo dài, `margin_utilization_ratio > 1` gần như tiết lộ nhãn).
+
+```text
+candidate overdue: snapshot hợp lệ AND (margin_debt(D) > 0 OR history_count(D) > 0)
+                   AND margin_status(D) <> 'OVERDUE'
+
+overdue_label_next_30d = 1 nếu tồn tại business_date trong [D+1, D+30]
+                         với margin_status = 'OVERDUE'
+                         (tức bắt đầu OVERDUE mới), ngược lại 0
+```
+
+- Nhóm `nu` không có dư nợ và không có lịch sử nên tự nhiên không thuộc candidate overdue.
+- Dòng không thuộc candidate overdue có nhãn rỗng (null), không phải 0; dataset overdue lọc theo cột `overdue_eligible`.
+- Dùng cùng `training_dataset` với cột `overdue_eligible` (int8); train model overdue chỉ trên các dòng `overdue_eligible=1`.
+- Số quan sát trên `day4_v2`: nhóm "có dư nợ, chưa OVERDUE" có positive rate 12,1%.
+
+### 11.4 `campaign_response_label_14d`
+
+```text
+dòng huấn luyện: mỗi campaign DELIVERED, grain (campaign_event_id)
+                 AND account ACTIVE tại ngày gửi D (theo giờ Asia/Ho_Chi_Minh)
+                 AND D <= raw_end - 14
+label = 1 nếu có valid event POSTED trong [D+1, D+14], ngược lại 0
+```
+
+Event trong ngày gửi D không tính vào nhãn và campaign cùng ngày không tạo uplift cho ngày D, nên hai thứ nhất quán.
+
 ## 12. Feature contract và chống leakage
 
 Cập nhật phạm vi Ngày 4: bỏ feature tùy chọn `days_since_last_margin_event` khỏi MVP. Lịch sử event vẫn được dùng nội bộ để xác định `nu/lu/au`. Snapshot được chốt cuối ngày; quy tắc segment đầu ngày trong generator không thay thế segment cuối ngày của feature snapshot.
@@ -646,6 +772,23 @@ margin_utilization_ratio, debt_change_7d, cash_balance,
 asset_value, collateral_value, cash_to_asset_ratio,
 NAV, margin_segment
 ```
+
+Feature mở rộng (feature contract `day4-v3`):
+
+```text
+fs_portfolio: holding_symbol_count, portfolio_concentration,
+              unrealized_loss_ratio, risky_asset_ratio
+              (portfolio_value giữ trong fs_portfolio nhưng không dùng thay asset_value, §9.2)
+fs_campaign:  campaign_count_30d, days_since_last_campaign
+              (không có campaign => 9999 chỉ ở bảng nguồn; bản train thêm cờ has_campaign_history
+               và tạo `days_since_last_campaign_capped` = min(giá trị, 365) để model tuyến tính không bị méo)
+overdue:      over_limit_streak (số ngày giao dịch liên tiếp margin_debt > margin_limit tính đến D),
+              over_limit_days_30d, debt_to_limit_change_7d
+campaign dataset thêm: account_age_days, margin_segment, cash_balance, asset_value, NAV,
+                       cash_to_asset_ratio, has_campaign_history
+```
+
+Mọi feature trên chỉ đọc dữ liệu đến cuối ngày `report_date` (với campaign là cuối ngày gửi). Cờ `overdue_eligible` không phải feature.
 
 Công thức:
 
@@ -712,6 +855,22 @@ snapshot không đủ label window: 0
 
 Tỷ lệ segment tại snapshot cuối: mỗi segment tối thiểu 10%; mỗi segment phải có cả label 0 và 1. Nếu không đạt, generator fail kèm báo cáo nguyên nhân.
 
+### 14.5 Gate cho nhãn mới (tạm thời, hiệu chỉnh sau lần chạy đầu)
+
+| Đại lượng | Ngưỡng PASS | Ghi chú |
+|---|---|---|
+| `overdue_label_next_30d` positive rate trên `overdue_eligible=1` | 5%–30% | Quan sát tham khảo ~12% |
+| Overdue positive rate theo segment `lu`, `au` | mỗi nhóm có cả lớp 0 và 1, rate 1%–40% | `nu` không thuộc candidate |
+| Số dòng `overdue_eligible=1` mỗi split | tối thiểu 50.000 | |
+| `campaign_response_label_14d` positive rate toàn bộ | 8%–40% | |
+| Số dòng campaign mỗi split | tối thiểu 5.000 | Mục tiêu 3–12 campaign mỗi tài khoản |
+| Lift campaign | 1,2–2,5 | response sau campaign DELIVERED / response nền không campaign, cùng segment |
+| Chênh lệch response giữa `offer_type` | ít nhất 1,5 điểm phần trăm giữa offer cao nhất và thấp nhất | Chứng minh offer có tín hiệu |
+| Campaign gửi cho tài khoản không ACTIVE | 0 | |
+| `portfolio_value`/`asset_value` | chỉ ghi vào report | Không gate (§9.2) |
+
+Nếu lift hoặc chênh lệch offer nằm ngoài ngưỡng thì điều chỉnh `campaign_uplift`, không sửa nhãn sau khi sinh.
+
 ### 14.4 Calibration positive rate
 
 Do `loan_label_next` là kết quả tích lũy của event trong 30 ngày, intercept trong `p_margin_event` không được giả định là đã tạo đúng positive rate. Generator phải calibration deterministic trước khi chạy full dataset:
@@ -727,6 +886,10 @@ Do `loan_label_next` là kết quả tích lũy của event trong 30 ngày, inte
 ```
 
 Calibration chỉ điều chỉnh `segment_effect_margin` của công thức event; không thay base intercept, seed, label window và không oversample label dương.
+
+### 14.6 Calibration có campaign
+
+Campaign làm tăng xác suất giải ngân, nên pilot calibration của §14.4 **phải bật `campaign_generation`** và `campaign_uplift`, để positive rate `loan_label_next` được calibrate trên cùng quy trình sinh với full dataset. Thứ tự: cố định `campaign_uplift` và `campaign_generation` theo config, rồi bisection `segment_effect_margin`. Không calibrate lại `campaign_uplift` bằng bisection; chỉ kiểm tra lift ở §14.5 sau khi sinh.
 
 ## 15. Schema tối thiểu đã chốt
 
@@ -786,6 +949,21 @@ amount: int64
 status: enum(POSTED, CANCELLED)
 ```
 
+### `customer_campaign`
+
+```text
+campaign_event_id: string, primary key (CMP-{master_account}-{sequence:03d})
+campaign_id: string (MARGIN-01..MARGIN-04)
+master_account: string, foreign key
+sent_at: timestamp (Asia/Ho_Chi_Minh)
+channel: enum(APP, SMS, EMAIL)
+offer_type: enum(RATE_DISCOUNT, FEE_WAIVER, LIMIT_BOOST)
+interest_rate_offer: float64
+status: enum(DELIVERED, FAILED)
+```
+
+Không có cột phản hồi; phản hồi chỉ tồn tại dưới dạng nhãn tính từ `margin_cash_flow`.
+
 ### `training_dataset`
 
 ```text
@@ -807,7 +985,46 @@ asset_value: int64
 collateral_value: int64
 cash_to_asset_ratio: float64
 NAV: int64
+portfolio_value: int64
+holding_symbol_count: int64
+portfolio_concentration: float64
+unrealized_loss_ratio: float64
+risky_asset_ratio: float64
+campaign_count_30d: int64
+days_since_last_campaign: int64
+over_limit_streak: int64
+over_limit_days_30d: int64
+overdue_eligible: int8 {0, 1}
 loan_label_next: int8 {0, 1}
+overdue_label_next_30d: int8 {0, 1}
+split: enum(train, validation, test)
+```
+
+Dataset campaign-event được xuất riêng:
+
+```text
+campaign_event_id: string
+campaign_id: string
+master_account: string
+report_date: date
+channel: enum(APP, SMS, EMAIL)
+offer_type: enum(RATE_DISCOUNT, FEE_WAIVER, LIMIT_BOOST)
+interest_rate_offer: float64
+account_age_days: float64
+margin_segment: enum(nu, lu, au)
+trade_count_30d: int64
+total_trading_amount_30d: int64
+margin_debt: int64
+margin_limit: int64
+margin_utilization_ratio: float64
+cash_balance: int64
+asset_value: int64
+NAV: int64
+holding_symbol_count: int64
+portfolio_concentration: float64
+campaign_count_30d: int64
+days_since_last_campaign: int64
+campaign_response_label_14d: int8 {0, 1}
 split: enum(train, validation, test)
 ```
 
@@ -816,7 +1033,7 @@ split: enum(train, validation, test)
 ```text
 data/generated/day4_v2/                         # source Parquet
 data/warehouse_full/raw_day4_v2/                # source Iceberg
-data/features/day4_runs/<run_id>/               # fs_* và training_dataset.parquet
+data/features/day4_runs/<run_id>/               # fs_*, training datasets và usecase registry
 data/warehouse_full/features_<run_id>/          # feature Iceberg
 data/catalog_full/pyiceberg.db                  # catalog
 ```
@@ -836,7 +1053,7 @@ Các giá trị `<computed-after-write>` trong ví dụ phải được generato
 
 ```json
 {
-  "generator_version": "0.1.0",
+  "generator_version": "0.2.0",
   "seed": 42,
   "num_accounts": 5000,
   "raw_start": "2025-01-01",
@@ -851,9 +1068,13 @@ Các giá trị `<computed-after-write>` trong ví dụ phải được generato
   "positive_rate_targets": {"nu": 0.15, "lu": 0.25, "au": 0.35},
   "output_sha256": {
     "customer_account.parquet": "<computed-after-write>",
+    "stock_price_daily.parquet": "<computed-after-write>",
     "stock_transaction.parquet": "<computed-after-write>",
     "margin_balance_daily.parquet": "<computed-after-write>",
     "margin_cash_flow.parquet": "<computed-after-write>",
+    "security_master.parquet": "<computed-after-write>",
+    "portfolio_holding_daily.parquet": "<computed-after-write>",
+    "customer_campaign.parquet": "<computed-after-write>",
     "training_dataset.parquet": "<computed-after-write>"
   }
 }
@@ -864,25 +1085,27 @@ Các giá trị `<computed-after-write>` trong ví dụ phải được generato
 1. Load và validate config.
 2. Khởi tạo calendar và fixed holidays.
 3. Khởi tạo universe 30 mã và chuỗi giá.
-4. Sinh `customer_account` và biến ẩn nội bộ.
-5. Sinh transaction theo account-day.
-6. Tính trading activity và sinh repayment độc lập.
-7. Sinh disbursement opportunity sau transaction và repayment.
-8. Tính balance theo state machine và margin status cuối ngày.
-9. Tạo candidate snapshot.
-10. Tính segment tại snapshot.
-11. Tính feature chỉ từ dữ liệu quá khứ.
-12. Tính label chỉ từ cửa sổ tương lai 30 ngày.
-13. Gán split theo `report_date`.
-14. Chạy toàn bộ data-quality checks.
-15. Nếu pass, ghi Parquet và metadata; nếu fail, không phát hành dataset.
+4. Sinh `customer_account`, `security_master` và biến ẩn nội bộ.
+5. Chạy state machine theo ngày cho từng tài khoản, theo thứ tự trong §9.2:
+   campaign opportunity (uplift từ t+1) → stock transactions → trading activity →
+   repayment → disbursement (có `campaign_logit_uplift`) → cập nhật balance và status.
+   `customer_campaign` là đầu ra của chính vòng lặp này.
+6. Tái dựng `portfolio_holding_daily` từ transaction + price (không đối soát với `asset_value`, §9.2).
+7. Tạo candidate snapshot và segment tại snapshot.
+8. Tính shared feature chỉ từ dữ liệu quá khứ, gồm feature mở rộng ở §12.
+9. Tính các label: 30 ngày cho loan; "bắt đầu OVERDUE" cho overdue (§11.3); 14 ngày cho campaign response (§11.4).
+10. Gán split theo `report_date`.
+11. Chạy toàn bộ data-quality checks, gồm §14.5.
+12. Nếu pass, ghi Parquet, `usecase_registry.json` và metadata; nếu fail, không phát hành dataset.
+
+Calibration (§14.4, §14.6) chạy trước bước 5 của lần sinh full.
 
 ## 18. Tiêu chí nghiệm thu cuối cùng
 
 Bản data generation đạt khi:
 
 - Không còn tham số quan trọng ở dạng range/ví dụ trong config.
-- Bốn bảng nguồn có schema và enum cố định.
+- Tám bảng nguồn có schema và enum cố định; bốn bảng nghiệp vụ cốt lõi được bổ sung `stock_price_daily`, `security_master`, `portfolio_holding_daily` và `customer_campaign` để phục vụ nhiều use case trên cùng feature platform.
 - Tần suất event, tỷ lệ cancelled và amount có công thức cụ thể.
 - Giá, hạn mức, dư nợ và số tiền event có công thức tái lập.
 - Segment và label có định nghĩa temporal không mơ hồ.
@@ -891,6 +1114,10 @@ Bản data generation đạt khi:
 - Positive rate và segment share nằm trong ngưỡng.
 - Chạy lại cùng seed cho cùng checksum đầu ra.
 - Dataset đọc được bằng pandas/DuckDB trước khi ghi Iceberg.
+- Cả ba use case đều có dataset đủ lớn, nhãn không tầm thường và đạt gate §14.5:
+  `overdue_risk` không dùng dòng đang OVERDUE, `campaign_response` có lift đo được và chênh lệch giữa các offer.
+- Campaign sinh trong cùng state machine với giải ngân; không có campaign cho tài khoản không ACTIVE.
+- Có test biên: nhãn overdue tại D+30/D+31, nhãn campaign tại D+14/D+15, dòng đang OVERDUE bị loại khỏi candidate overdue, campaign `FAILED` không tính.
 
 ## 19. Những gì không được tự ý thay đổi
 
@@ -903,6 +1130,8 @@ Không tự ý thay đổi:
 - Dùng `MAX(event_date)` theo tài khoản để cắt snapshot.
 - Random split theo dòng.
 - Gán label 0 cho snapshot bị censor.
+- Định nghĩa lại nhãn overdue hoặc campaign sau khi đã thấy kết quả model.
+- Tạo campaign sau khi đã sinh events, hoặc cho campaign tác động ngược về ngày gửi.
 - Sinh `margin_balance_daily` độc lập với `margin_cash_flow`.
 
 Mọi thay đổi phải tạo config/version mới và cập nhật lại tài liệu này.

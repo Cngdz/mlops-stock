@@ -1,0 +1,12 @@
+# Feast feature repo, phase 1 = offline only.
+# Offline store: Parquet fs_* of the approved Day 4 run (data/features/current.json).
+# Online store is declared because Feast requires one; nothing is materialized until phase 2 (Redis).
+project: margin_mlops
+provider: local
+registry: data/registry.db
+offline_store:
+  type: file
+online_store:
+  type: sqlite
+  path: data/online.db
+entity_key_serialization_version: 3

@@ -9,11 +9,11 @@ from data_generation.generate_all import generate_prices, generate_events, END, 
 from scripts.day4_feature_engineering import normalize, build, records
 
 
-def measure(accounts, transactions, cashflows, balances):
+def measure(accounts, transactions, cashflows, balances, campaigns):
     with duckdb.connect() as con:
         con.execute("SET TimeZone='Asia/Ho_Chi_Minh'")
         con.execute("SET threads=4")
-        for name, frame in [('customer_account',accounts), ('stock_transaction',transactions), ('margin_cash_flow',cashflows), ('margin_balance_daily',balances)]:
+        for name, frame in [('customer_account',accounts), ('stock_transaction',transactions), ('margin_cash_flow',cashflows), ('margin_balance_daily',balances), ('customer_campaign',campaigns)]:
             con.register('frame',frame)
             con.execute(f'CREATE TABLE {name} AS SELECT * FROM frame')
             con.unregister('frame')
@@ -21,7 +21,8 @@ def measure(accounts, transactions, cashflows, balances):
         build(con,END)
         rates = records(con, 'SELECT margin_segment, count(*) AS rows, avg(loan_label_next) AS positive_rate FROM candidate GROUP BY ALL ORDER BY 1')
         shares = records(con, 'SELECT margin_segment,count(*)::DOUBLE/(SELECT count(*) FROM candidate WHERE report_date=(SELECT max(report_date) FROM candidate)) AS share FROM candidate WHERE report_date=(SELECT max(report_date) FROM candidate) GROUP BY ALL ORDER BY 1')
-    return {r['margin_segment']:r['positive_rate'] for r in rates}, shares
+        offers = records(con, 'SELECT offer_type, count(*) AS rows, avg(campaign_response_label_14d) AS response_rate FROM campaign_candidate GROUP BY ALL ORDER BY 1')
+    return {r['margin_segment']:r['positive_rate'] for r in rates}, shares, offers
 
 
 def calibrate(output, pilot_size=500):
@@ -32,9 +33,10 @@ def calibrate(output, pilot_size=500):
     history = []
     result = {'status':'FAIL','seed':SEED,'pilot_size':pilot_size,'repayment_probability':.10,'targets':target,'tolerance':.03,'history':history}
     for iteration in range(1,9):
-        transactions,cashflows,balances = generate_events(accounts,prices,intercepts=intercepts)
-        rates, shares = measure(accounts,transactions,cashflows,balances)
-        record = {'iteration':iteration,'intercepts':intercepts.copy(),'rates':rates,'last_snapshot_shares':shares}
+        # Decisions 14.6: pilot runs with campaigns enabled, same as the full dataset.
+        transactions,cashflows,balances,campaigns = generate_events(accounts,prices,intercepts=intercepts)
+        rates, shares, offers = measure(accounts,transactions,cashflows,balances,campaigns)
+        record = {'iteration':iteration,'intercepts':intercepts.copy(),'rates':rates,'last_snapshot_shares':shares,'campaign_response_by_offer':offers}
         history.append(record)
         print(json.dumps(record),flush=True)
         if all(s in rates and abs(rates[s]-target[s])<=.03 for s in target):
