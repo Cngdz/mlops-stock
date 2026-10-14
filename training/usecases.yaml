@@ -1,0 +1,97 @@
+# Day 6 training config. One entry per use case in usecase_registry.json.
+# Features are an explicit ALLOWLIST: a column added to the Day 4 output never reaches a model
+# until it is listed here. config.py rejects labels, keys, split and excluded columns.
+#
+# segment_column: one binary model per value in `segments`; omit `segments` for a single model.
+# class_weights:  dotted path into class_weights.json (fit on train in Day 4, reused as-is).
+# threshold:      chosen on validation. max_f1 | min_recall (value = recall floor).
+
+defaults:
+  seed: 42
+  n_jobs: 4                # fixed: LightGBM deterministic mode needs a fixed thread count
+  lgbm:
+    n_estimators: 2000     # upper bound; early stopping on validation picks the real count
+    learning_rate: 0.05
+    num_leaves: 31
+    min_child_samples: 100
+    subsample: 0.8
+    subsample_freq: 1
+    colsample_bytree: 0.8
+    reg_lambda: 1.0
+    early_stopping_rounds: 100
+  lr:
+    C: 1.0
+    max_iter: 2000
+
+account_features: &account_features   # = Feast services loan_propensity / overdue_risk, minus margin_segment
+  - account_age_days
+  - trade_count_7d
+  - trade_count_30d
+  - total_trading_amount_7d
+  - total_trading_amount_30d
+  - active_trading_days_30d
+  - margin_debt
+  - margin_limit
+  - margin_utilization_ratio
+  - debt_change_7d
+  - over_limit_streak
+  - over_limit_days_30d
+  - cash_balance
+  - asset_value
+  - collateral_value
+  - cash_to_asset_ratio
+  - NAV
+  - holding_symbol_count
+  - portfolio_concentration
+  - unrealized_loss_ratio
+  - risky_asset_ratio
+  - campaign_count_30d
+  - days_since_last_campaign
+  - has_campaign_history
+
+use_cases:
+  loan_propensity:
+    dataset: training_dataset
+    label: loan_label_next
+    segment_column: margin_segment
+    segments: [nu, lu, au]
+    numeric_features: *account_features
+    categorical_features: []
+    class_weights: segments
+    threshold: {rule: max_f1}
+
+  overdue_risk:
+    dataset: training_dataset
+    label: overdue_label_next_30d
+    row_filter: overdue_eligible == 1   # nu has no debt -> no overdue model
+    segment_column: margin_segment
+    segments: [lu, au]
+    numeric_features: *account_features
+    categorical_features: []
+    class_weights: overdue_risk.segments
+    threshold: {rule: max_f1}
+
+  campaign_response:
+    dataset: campaign_training_dataset
+    label: campaign_response_label_14d
+    segment_column: margin_segment      # used as a feature, not a split: one model
+    numeric_features:
+      - interest_rate_offer
+      - account_age_days
+      - trade_count_30d
+      - total_trading_amount_30d
+      - margin_debt
+      - margin_limit
+      - margin_utilization_ratio
+      - cash_balance
+      - asset_value
+      - cash_to_asset_ratio
+      - NAV
+      - holding_symbol_count
+      - portfolio_concentration
+      - campaign_count_30d
+      - days_since_last_campaign
+      - has_campaign_history
+    categorical_features: [channel, offer_type, margin_segment]
+    class_weights: campaign_response
+    threshold: {rule: max_f1}

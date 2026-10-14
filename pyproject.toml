@@ -9,10 +9,13 @@ dependencies = [
     "duckdb>=1.5.5",
     "faker>=40.37.0",
     "feast>=0.66,<0.67",
+    "joblib>=1.5.3",
+    "lightgbm>=4.6",
     "mlflow>=3.15.2",
     "numpy>=2.5.2",
     "pandas>=2.3.3",
     "pyarrow>=25.0.1",
     "pyiceberg[sql-sqlite]>=0.12.0",
+    "pyyaml>=6.0.3",
     "scikit-learn>=1.9.0",
 ]

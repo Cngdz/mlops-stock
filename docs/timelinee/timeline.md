@@ -197,6 +197,8 @@
     **Học:** Huấn luyện model phân loại nhị phân riêng theo segment (`nu/lu/au`), xử lý class weight trong LightGBM.
     
     **Deliverable:** Model train xong, metric in ra console/notebook.
+
+    **Kết quả 14/10/2026:** package `training/` (`usecases.yaml` allowlist feature + `config`/`data`/`models`/`evaluate`/`train`), chạy `python -m training.train`. Run `20261014T080440214796` trên feature run `20261007T095923177784`: 6 model segment (loan `nu/lu/au`, overdue `lu/au`, campaign chung), mỗi segment LR + LightGBM dạng sklearn `Pipeline`, ngưỡng max-F1 và chọn model theo validation ROC-AUC, test chấm một lần. Test ROC-AUC của model được chọn: loan nu 0.58 / lu 0.56 / au 0.64; overdue lu 0.80 / au 0.88; campaign 0.73. AUC loan thấp là do generator (nhãn phụ thuộc chủ yếu vào `margin_affinity`/`wealth_level`/`risk_appetite` ẩn). `tests/test_training.py` (leakage guard, chặn quality FAIL, split chồng thời gian, end-to-end, tái lập) PASS.
     
     ---
     
