@@ -1,0 +1,26 @@
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: mlflow-mlserver
+  namespace: serving
+spec:
+  supportedModelFormats:
+    - name: mlflow
+      version: "3"
+      autoSelect: true
+  protocolVersions: [v2]
+  containers:
+    - name: kserve-container
+      image: mlserver-mlflow:v1
+      imagePullPolicy: Never
+      args: ["mlserver", "start", "/mnt/models"]
+      env:
+        - {name: MLSERVER_MODEL_IMPLEMENTATION, value: mlserver_mlflow.MLflowRuntime}
+        - {name: MLSERVER_MODEL_NAME, value: "{{.Name}}"}
+        - {name: MLSERVER_MODEL_URI, value: /mnt/models}
+        - {name: MLSERVER_HTTP_PORT, value: "8080"}
+        - {name: MLSERVER_GRPC_PORT, value: "9000"}
+        - {name: MLSERVER_PARALLEL_WORKERS, value: "0"}
+      resources:
+        requests: {cpu: 100m, memory: 512Mi}
+        limits: {cpu: "1", memory: 1Gi}
