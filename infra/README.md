@@ -49,6 +49,36 @@ Behaviour to remember: KServe copies ISVC annotations and labels onto the pod te
 (including ArgoCD's own tracking annotation on first adoption, and `mlops/model-version` on every promotion)
 rolls the pod once. Rollout is zero-downtime: the old pod stays until the new one is Ready.
 
+## Deployer (Day 10): @production in MLflow -> manifest commit in Git
+
+`deployer/` keeps `serving/k8s/30-isvc-<model>.yaml` equal to what `@production` says (models listed in
+`deployer/models.yaml`). It never touches the cluster: it commits the file to `master` through the GitHub API and
+ArgoCD does the rest. That file is generated, do not edit it by hand.
+
+```powershell
+# .env (git-ignored): GITHUB_TOKEN=<fine-grained token, only this repo, Contents: read and write>
+.\infra\port-forward.ps1                                         # MLflow on 127.0.0.1:5050
+uv run --env-file .env python -m deployer --dry-run              # print the diff, commit nothing
+uv run --env-file .env python -m deployer                        # one round
+uv run --env-file .env python -m deployer --loop --interval 60   # poll every 60 s
+uv run python -m pytest tests/test_deployer.py                   # not `uv run pytest`: the global pytest is broken
+```
+
+Promote = set alias `production` on the version (MLflow UI: Models -> model -> version -> Aliases, or
+`training.promote --approve`). Rollback = set it back on the older version; there is no other path.
+Always `git pull` before pushing: the deployer commits to the same branch.
+
+Safety rules in the code (tested): a missing alias or model leaves everything alone; any other MLflow error
+aborts the round without committing (a failed read must not look like an empty desired state); an unchanged
+manifest produces no commit (so no pod roll). MLflow 3.15.2: `mv.model_id` is None, the S3 path comes from
+`get_logged_model(mv.source.removeprefix("models:/")).artifact_location`; a model without the alias raises
+`INVALID_PARAMETER_VALUE ... not found`, an unknown model `RESOURCE_DOES_NOT_EXIST`.
+
+Measured (promote loan_propensity_au v2 -> v4 via the MLflow UI, 21/10/2026): deployer commit 15:58:52 ->
+ArgoCD sync finished +23 s -> new pod Ready +17 s (40 s after the commit). The alias-change time was not
+recorded, so alias -> commit (at most the 60 s poll) is unmeasured. These 40 s are a lucky poll: ArgoCD's
+reconcile is 60 s + up to 60 s jitter, see the Day 9 section.
+
 ## Pitfalls already hit
 
 | Symptom | Cause | Fix in repo |
