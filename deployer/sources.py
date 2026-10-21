@@ -5,6 +5,7 @@ import base64
 import os
 
 import requests
+from botocore.exceptions import ClientError
 from mlflow import MlflowClient
 from mlflow.exceptions import MlflowException
 
@@ -30,6 +31,34 @@ def resolve_target(client: MlflowClient, registered_model: str) -> tuple[str, st
     # MLflow 3: mv.source is "models:/m-<id>" and mv.model_id is None; the S3 path lives on the logged model.
     model_id = mv.source.removeprefix("models:/")
     return str(mv.version), client.get_logged_model(model_id).artifact_location
+
+
+class ArtifactStore:
+    """Does the model artifact behind a storageUri exist in S3/MinIO? Needs the MinIO port-forward (9000)."""
+
+    def __init__(self, s3=None):
+        self._s3 = s3
+
+    @property
+    def s3(self):
+        if self._s3 is None:
+            import boto3
+            from botocore.config import Config
+            self._s3 = boto3.client("s3", endpoint_url=os.environ["MLFLOW_S3_ENDPOINT_URL"],
+                                    region_name="us-east-1", config=Config(signature_version="s3v4"))
+        return self._s3
+
+    def exists(self, storage_uri: str) -> bool:
+        """True if <storage_uri>/MLmodel exists, False if it is not there. Any other failure (MinIO down,
+        bad credentials) propagates: "could not look" must never read as "missing"."""
+        bucket, _, key = storage_uri.removeprefix("s3://").partition("/")
+        try:
+            self.s3.head_object(Bucket=bucket, Key=f"{key.rstrip('/')}/MLmodel")
+            return True
+        except ClientError as err:
+            if err.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+                return False
+            raise
 
 
 class GitHubRepo:

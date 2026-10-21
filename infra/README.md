@@ -64,6 +64,14 @@ uv run --env-file .env python -m deployer --loop --interval 60   # poll every 60
 uv run python -m pytest tests/test_deployer.py                   # not `uv run pytest`: the global pytest is broken
 ```
 
+Day 11 additions: the decision lives in the pure `deployer/plan.py` (`skip | unchanged | blocked | create |
+update`). Before committing a changed manifest the deployer checks that `<storageUri>/MLmodel` exists in MinIO
+(needs the MinIO port-forward on 9000; steady-state rounds do not touch MinIO). If the artifact is missing the
+round reports `blocked` and commits nothing; if MinIO itself cannot be read the round aborts, same rule as
+MLflow. `--loop` syncs every 60 s and, every 600 s (`--verify-every`), compares the live InferenceService
+(`kubectl get isvc`) with `@production`: `ok | lagging | not_ready | missing`. That check only reports; ArgoCD
+is the one that repairs the cluster.
+
 Promote = set alias `production` on the version (MLflow UI: Models -> model -> version -> Aliases, or
 `training.promote --approve`). Rollback = set it back on the older version; there is no other path.
 Always `git pull` before pushing: the deployer commits to the same branch.
