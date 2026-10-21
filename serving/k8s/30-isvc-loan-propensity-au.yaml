@@ -8,7 +8,7 @@ metadata:
   labels:
     mlops/registered-model: loan_propensity_au
   annotations:
-    mlops/model-version: '2'
+    mlops/model-version: '4'
 spec:
   predictor:
     serviceAccountName: model-puller
@@ -18,4 +18,4 @@ spec:
         version: '3'
       runtime: mlflow-mlserver
       protocolVersion: v2
-      storageUri: s3://mlflow/1/models/m-d02adce3c18e430d9d8073014678bd6f/artifacts
+      storageUri: s3://mlflow/1/models/m-338ab008487241eab31851b7004478a5/artifacts
