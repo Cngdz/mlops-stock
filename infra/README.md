@@ -30,7 +30,7 @@ Not in Git, so apply once by hand after the cluster exists:
 
 ```powershell
 helmfile -f infra\helmfile.yaml sync                          # includes argocd and metrics-server
-kubectl apply -f infraootstrap\minio-s3-secret.yaml          # S3 credentials for the storage-initializer (outside ArgoCD's path)
+kubectl apply -f infra\bootstrap\minio-s3-secret.yaml          # S3 credentials for the storage-initializer (outside ArgoCD's path)
 kubectl -n argocd create secret generic repo-mlops-stock `
   --from-literal=type=git --from-literal=url=https://github.com/Cngdz/mlops-stock.git `
   --from-literal=username=Cngdz --from-literal=password=<read-only fine-grained token>
