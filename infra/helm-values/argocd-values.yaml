@@ -1,0 +1,12 @@
+# Local lab: cắt thành phần không dùng để tiết kiệm RAM.
+dex:
+  enabled: false              # SSO, không cần: dùng tài khoản admin
+notifications:
+  enabled: false
+applicationSet:
+  enabled: false              # sinh nhiều Application tự động, chưa cần
+configs:
+  params:
+    server.insecure: true     # UI chạy HTTP sau port-forward, khỏi cảnh báo cert tự ký
+  cm:
+    timeout.reconciliation: 60s   # mặc định 180s; rút ngắn để demo đỡ chờ

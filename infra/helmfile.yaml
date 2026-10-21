@@ -1,6 +1,3 @@
-# MLOps platform: Postgres (MLflow backend), Redis (Feast online, phase 2), MinIO (artifacts), MLflow.
-# Bring-up and checks: see infra/README.md (bootstrap.ps1 -> port-forward.ps1 -> day1_verify.py).
-
 repositories:
   - name: bitnami
     url: https://charts.bitnami.com/bitnami
@@ -8,6 +5,8 @@ repositories:
     url: https://charts.min.io/
   - name: community-charts
     url: https://community-charts.github.io/helm-charts
+  - name: argo
+    url: https://argoproj.github.io/argo-helm
 
 helmDefaults:
   wait: true          # sync returns only when pods are Ready (MLflow 3 image is large: first pull takes minutes)
@@ -48,3 +47,10 @@ releases:
       - mlops/minio
     values:
       - ./helm-values/mlflow-values.yaml
+
+  - name: argocd
+    namespace: argocd
+    chart: argo/argo-cd
+    version: 10.10.5      # app v3.5.5
+    values:
+      - ./helm-values/argocd-values.yaml

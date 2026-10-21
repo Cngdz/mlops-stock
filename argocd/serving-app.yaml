@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: serving
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Cngdz/mlops-stock.git
+    targetRevision: master
+    path: serving/k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: serving
+  syncPolicy:
+    automated:
+      prune: true        # file removed from Git -> resource removed from cluster
+      selfHeal: true     # manual edits on the cluster are reverted to Git
+    syncOptions:
+      - ServerSideApply=true   # avoids permanent OutOfSync from KServe webhook defaults
