@@ -5,6 +5,7 @@ metadata:
   namespace: serving
   labels:
     mlops/registered-model: loan_propensity_au
+    mlops/owner: cuong
   annotations:
     mlops/model-version: "2"
 spec:

@@ -1,0 +1,4 @@
+# kind kubelets use self-signed serving certs, so metrics-server must skip kubelet TLS verification.
+# Local lab only; a real cluster uses properly signed kubelet certs.
+args:
+  - --kubelet-insecure-tls

@@ -7,6 +7,8 @@ repositories:
     url: https://community-charts.github.io/helm-charts
   - name: argo
     url: https://argoproj.github.io/argo-helm
+  - name: metrics-server
+    url: https://kubernetes-sigs.github.io/metrics-server/
 
 helmDefaults:
   wait: true          # sync returns only when pods are Ready (MLflow 3 image is large: first pull takes minutes)
@@ -54,3 +56,12 @@ releases:
     version: 10.10.5      # app v3.5.5
     values:
       - ./helm-values/argocd-values.yaml
+
+  # Resource metrics API: KServe creates an HPA per InferenceService, which reads pod CPU from it
+  # (without it the HPA is Degraded and `kubectl top` fails).
+  - name: metrics-server
+    namespace: kube-system
+    chart: metrics-server/metrics-server
+    version: 3.14.0       # app v0.9.0
+    values:
+      - ./helm-values/metrics-server-values.yaml
