@@ -1,0 +1,7 @@
+# Models the deployer keeps in sync with @production. One InferenceService (~1 GB RAM) per entry:
+# add lines only while the cluster has memory for them.
+repo: Cngdz/mlops-stock
+branch: master
+namespace: serving
+models:
+  - loan_propensity_au
