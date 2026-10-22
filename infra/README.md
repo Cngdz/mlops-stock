@@ -117,6 +117,51 @@ Measured (21-22/10/2026): image 2.15 GB; smoke train about 1.3 GB RAM peak (limi
 Airflow container about 1.56 GiB while starting, about 0.57 GiB idle; DAG run train -> gate 1 min 38 s (train pod 71 s
 including start, gate pod 9 s). The registered run carries `git_commit` of the image (28d9e2a) instead of `unknown`.
 
+## Monitoring tables: Iceberg on MinIO (Day 13)
+
+Two Iceberg catalogs by role. The Day 3-4 source/feature tables stay in the local SQLite catalog
+(`data/catalog_full`, warehouse on the host disk). The in-cluster tables use a PyIceberg `SqlCatalog` stored in the
+Postgres database `iceberg_catalog` (the Postgres that already backs MLflow) with data in `s3://warehouse/` (MinIO):
+pods and the host read the same tables, and table locations are `s3://` URIs instead of `C:\...`. A production setup
+would use one REST catalog (Lakekeeper, Polaris, Nessie) for everything.
+
+One-time setup (bucket `warehouse` is also in `minio-values.yaml` for a fresh install):
+
+```powershell
+kubectl -n mlops exec postgres-postgresql-0 -- env PGPASSWORD=mlflowpassword psql -U postgres -c "CREATE DATABASE iceberg_catalog"
+kubectl -n mlops exec deploy/minio -- sh -c "mc alias set local http://localhost:9000 minioadmin minioadmin && mc mb --ignore-existing local/warehouse"
+.\infra\port-forward.ps1                     # now also Postgres on 127.0.0.1:5432 (catalog access from the host)
+```
+
+| Table (namespace `monitoring`) | Written by | Partition | Re-run |
+|---|---|---|---|
+| `pred_loan_propensity` | `pipeline.predict --date D [--end E]` | `score_date` | replaces that day |
+| `drift_loan_propensity` | `pipeline.drift --date D [--reference R]` | `current_date` | replaces (D, R) |
+| `eval_loan_propensity` | `pipeline.evaluate --start S --end E` | `window_end` | replaces (S, E) |
+
+Thresholds live in `pipeline/monitoring.yaml` (still [TODO] for mentor confirmation in the design doc). Drift HTML
+reports: `s3://warehouse/reports/drift/<usecase>/<day>_vs_<reference>.html` (MinIO console, port 9001).
+DAGs: `loan_propensity_predict` = predict -> drift -> retrain_check (exit 99 = skip) -> trigger
+`loan_propensity_train`; `loan_propensity_evaluate` weekly. Dates are DAG params because the synthetic data has no
+"today" (features end 2026-01-30, labels end 2025-12-31).
+
+Measured on the host (22/10/2026): predict 2026-01-30 = 4731 rows (au v4 2937, lu v4 851, nu v2 943), re-run still
+4731. Drift 2026-01-30 vs 2025-06-30 = 18/24 features (75%) -> critical; vs 2026-01-29 = 1/24 (account_age_days,
+which grows every day) -> medium. The generator has strong trends, so the training reference always reads critical:
+`retrain_cooldown_days: 7` keeps a lasting drift from retraining every day on the same data. Evaluate 2025-12-25..31
+(33117 rows): au 0.645 vs 0.636, lu 0.528 vs 0.563, nu 0.584 vs 0.577 -> all OK (largest drop 0.035, warn at 0.05).
+Not an independent hold-out: Oct-Dec 2025 is the test split the gate used.
+
+Same results in the cluster (Airflow -> pods from the rebuilt image, 2.68 GB, `GIT_COMMIT` 106b548): predict 2026-01-30
+4731 rows, drift 18/24 critical, evaluate 33117 rows with the same AUCs; `monitoring.driftSeverity=critical` tags on
+the three @production versions; `pred_*` holds 37848 rows = 8 days x 4731 after three runs of 2026-01-30 (idempotent
+partition overwrite). `retrain_check` correctly exits 99 (critical, but the last training is within the 7-day
+cooldown) and the `trigger_retrain` task is skipped, not failed. One unexplained flake: the first `retrain_check`
+pod never got a scheduling event and hit the 300 s start timeout; the same pod ran fine by hand and on a clear +
+re-run, so `retrain_check` now has `retries=1`. Rebuilding the image after a `uv.lock` change re-downloads every
+package (about 10 min, needs network) and `kind load` of 2.6 GB takes several minutes: keep an eye on the host disk
+(C: was down to 16 GB free).
+
 ## Pitfalls already hit
 
 | Symptom | Cause | Fix in repo |

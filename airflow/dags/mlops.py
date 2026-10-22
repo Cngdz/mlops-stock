@@ -79,11 +79,13 @@ with DAG(
                    ["pipeline.predict", "--date", "{{ params.score_date }}"], memory="1536Mi")
     drift = step("drift", ["python", "-m"],
                  ["pipeline.drift", "--date", "{{ params.score_date }}"], memory="1536Mi")
-    # exit 0 = critical drift past the cooldown, exit 99 = skip (this task and the trigger turn pink, not red)
+    # exit 0 = critical drift past the cooldown, exit 99 = skip (this task and the trigger turn pink, not red).
+    # retries=1: exit 99 is a skip and is never retried, but a pod that fails to start (seen once: 300 s with no
+    # scheduling event, not reproducible) or a transient MLflow/Postgres error deserves one more try.
     retrain_check = step("retrain_check", ["python", "-m"],
                          ["pipeline.drift", "--should-retrain", "--date", "{{ params.score_date }}",
                           "--cooldown-days", "{{ params.cooldown_days }}"],
-                         retries=0, skip_on_exit_code=99)
+                         retries=1, skip_on_exit_code=99)
     # The retrained model still stops at @staging: drift can start training, never promotion.
     retrain = TriggerDagRunOperator(task_id="trigger_retrain", trigger_dag_id="loan_propensity_train")
     predict >> drift >> retrain_check >> retrain
