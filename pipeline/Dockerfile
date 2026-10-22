@@ -17,6 +17,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY training ./training
+COPY pipeline/*.py pipeline/monitoring.yaml ./pipeline/
 ARG GIT_COMMIT=unknown
 ENV GIT_COMMIT=$GIT_COMMIT
 # data/ is NOT in the image: it is mounted from the PVC at /app/data

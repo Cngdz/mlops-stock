@@ -4,7 +4,8 @@
 # Runs as background jobs of THIS PowerShell session; keep the window open.
 # Stop: Get-Job pf-* | Stop-Job -PassThru | Remove-Job
 $ErrorActionPreference = "Stop"
-$forwards = @{ "pf-mlflow" = "svc/mlflow 5050:80"; "pf-minio" = "svc/minio 9000:9000" }
+#   Postgres 127.0.0.1:5432 -> svc/postgres-postgresql (Day 13: Iceberg catalog db iceberg_catalog)
+$forwards = @{ "pf-mlflow" = "svc/mlflow 5050:80"; "pf-minio" = "svc/minio 9000:9000"; "pf-postgres" = "svc/postgres-postgresql 5432:5432" }
 
 Get-Job pf-* -ErrorAction SilentlyContinue | Stop-Job -PassThru | Remove-Job
 foreach ($name in $forwards.Keys) {

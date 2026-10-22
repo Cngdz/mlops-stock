@@ -2,10 +2,14 @@
 
 Training stops at @staging. @production is set only by a human (training.promote --approve), so no
 task here may ever pass --approve.
+
+The synthetic data has no "today": its last feature day is 2026-01-30 and labels end 2025-12-31, so the dates are
+DAG params (editable in "Trigger DAG w/ config"). In production they would be {{ ds }}-based.
 """
 from datetime import datetime
 
 from airflow import DAG
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from kubernetes.client import models as k8s
 
@@ -13,6 +17,9 @@ IMAGE = "mlops-pipeline:v1"
 ENV = {  # in-cluster addresses: no port-forward from inside the cluster
     "MLFLOW_TRACKING_URI": "http://mlflow.mlops.svc.cluster.local",
     "MLFLOW_S3_ENDPOINT_URL": "http://minio.mlops.svc.cluster.local:9000",
+    # Iceberg catalog (Postgres db iceberg_catalog); demo credentials, a real setup reads them from a Secret
+    "ICEBERG_CATALOG_URI":
+        "postgresql+psycopg2://postgres:mlflowpassword@postgres-postgresql.mlops.svc.cluster.local:5432/iceberg_catalog",
 }
 DATA = k8s.V1Volume(
     name="data",
@@ -21,7 +28,7 @@ DATA = k8s.V1Volume(
 DATA_MOUNT = k8s.V1VolumeMount(name="data", mount_path="/app/data")
 
 
-def step(task_id: str, cmds: list[str], args: list[str], memory: str = "1Gi", retries: int = 1):
+def step(task_id: str, cmds: list[str], args: list[str], memory: str = "1Gi", retries: int = 1, **kwargs):
     return KubernetesPodOperator(
         task_id=task_id,
         name=task_id.replace("_", "-"),
@@ -40,6 +47,7 @@ def step(task_id: str, cmds: list[str], args: list[str], memory: str = "1Gi", re
         on_finish_action="delete_pod",
         startup_timeout_seconds=300,
         retries=retries,
+        **kwargs,
     )
 
 
@@ -64,14 +72,32 @@ with DAG(
     schedule="@daily",
     catchup=False,
     max_active_runs=1,
+    params={"score_date": "2026-01-30", "cooldown_days": 7},
     tags=["mlops"],
 ):
-    # Day 12 skeleton: only proves a pod can read the registry. Day 13 replaces it with batch scoring.
-    step(
-        "read_production",
-        ["python", "-c"],
-        [
-            "from training import registry; c = registry.configure(); "
-            "print({n: c.get_registered_model(n).aliases for n in ['loan_propensity_au']})"
-        ],
-    )
+    predict = step("predict", ["python", "-m"],
+                   ["pipeline.predict", "--date", "{{ params.score_date }}"], memory="1536Mi")
+    drift = step("drift", ["python", "-m"],
+                 ["pipeline.drift", "--date", "{{ params.score_date }}"], memory="1536Mi")
+    # exit 0 = critical drift past the cooldown, exit 99 = skip (this task and the trigger turn pink, not red)
+    retrain_check = step("retrain_check", ["python", "-m"],
+                         ["pipeline.drift", "--should-retrain", "--date", "{{ params.score_date }}",
+                          "--cooldown-days", "{{ params.cooldown_days }}"],
+                         retries=0, skip_on_exit_code=99)
+    # The retrained model still stops at @staging: drift can start training, never promotion.
+    retrain = TriggerDagRunOperator(task_id="trigger_retrain", trigger_dag_id="loan_propensity_train")
+    predict >> drift >> retrain_check >> retrain
+
+
+with DAG(
+    "loan_propensity_evaluate",
+    start_date=datetime(2026, 10, 1),
+    schedule="@weekly",
+    catchup=False,
+    max_active_runs=1,
+    params={"start": "2025-12-25", "end": "2025-12-31"},
+    tags=["mlops"],
+):
+    # Needs pred rows for the window (backfill: pipeline.predict --date <start> --end <end>) and closed labels.
+    step("evaluate", ["python", "-m"],
+         ["pipeline.evaluate", "--start", "{{ params.start }}", "--end", "{{ params.end }}"], memory="1536Mi")

@@ -23,6 +23,10 @@ buckets:
   - name: mlflow
     policy: none
     purge: false
+  # Day 13: Iceberg warehouse for in-cluster tables (predictions, drift, evaluation); catalog = Postgres db iceberg_catalog
+  - name: warehouse
+    policy: none
+    purge: false
 
 persistence:
   enabled: true

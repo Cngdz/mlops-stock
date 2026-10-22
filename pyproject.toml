@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.43.81",
     "duckdb>=1.5.5",
+    "evidently>=0.7.23",
     "faker>=40.37.0",
     "feast>=0.66,<0.67",
     "joblib>=1.5.3",
@@ -15,7 +16,7 @@ dependencies = [
     "numpy>=2.5.2",
     "pandas>=2.3.3",
     "pyarrow>=25.0.1",
-    "pyiceberg[sql-sqlite]>=0.12.0",
+    "pyiceberg[sql-postgres,sql-sqlite]>=0.12.0",
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
     "scikit-learn>=1.9.0",
