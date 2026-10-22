@@ -1,0 +1,13 @@
+.venv
+.venv-local
+.git
+.env
+data
+docs
+airflow
+serving
+infra
+**/__pycache__
+.pytest_cache
+*.pptx
+*.svg

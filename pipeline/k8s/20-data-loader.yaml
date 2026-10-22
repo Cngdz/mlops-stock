@@ -1,0 +1,20 @@
+# Temporary pod to copy a feature run into the PVC (kubectl cp needs a running container).
+# Not part of any GitOps path: apply it by hand, copy, delete it. The data stays on the PVC.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: data-loader
+  namespace: pipeline
+spec:
+  containers:
+    - name: loader
+      image: mlops-pipeline:v1
+      imagePullPolicy: Never
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: data
+          mountPath: /app/data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: pipeline-data

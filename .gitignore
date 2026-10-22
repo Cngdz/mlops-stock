@@ -226,3 +226,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Cluster-admin credentials for the Airflow container (Day 12)
+airflow/kubeconfig

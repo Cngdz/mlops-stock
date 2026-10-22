@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import subprocess
 import time
@@ -69,6 +70,8 @@ def train_segment(uc: UseCase, data: SegmentData) -> SegmentResult:
 
 
 def git_commit() -> str:
+    if os.environ.get("GIT_COMMIT"):  # baked in at image build time: containers have no .git
+        return os.environ["GIT_COMMIT"]
     try:
         sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True).strip()
         dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip()

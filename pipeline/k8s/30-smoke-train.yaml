@@ -1,0 +1,29 @@
+# Smoke test: train in the cluster WITHOUT MLflow (--no-mlflow) to prove image + data + memory,
+# without creating registry versions. Apply by hand, read the logs, delete.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: smoke-train
+  namespace: pipeline
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: train
+          image: mlops-pipeline:v1
+          imagePullPolicy: Never
+          command: ["python", "-m", "training.train", "--usecase", "loan_propensity", "--no-mlflow"]
+          resources:
+            requests:
+              memory: 256Mi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pipeline-data

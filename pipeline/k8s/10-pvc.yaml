@@ -1,0 +1,12 @@
+# Feature runs (input) and day6_runs (local copies of trained models) for the pods in this namespace.
+# The kind storage class binds on first use (WaitForFirstConsumer): Pending until a pod mounts it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pipeline-data
+  namespace: pipeline
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi

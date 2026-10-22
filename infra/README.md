@@ -87,6 +87,36 @@ ArgoCD sync finished +23 s -> new pod Ready +17 s (40 s after the commit). The a
 recorded, so alias -> commit (at most the 60 s poll) is unmeasured. These 40 s are a lucky poll: ArgoCD's
 reconcile is 60 s + up to 60 s jitter, see the Day 9 section.
 
+## Pipeline in the cluster + Airflow (Day 12)
+
+Batch work (train, promote report, later batch predict) runs as pods from the `mlops-pipeline` image in namespace
+`pipeline`; Airflow (standalone, in Docker, on the `kind` network) only schedules and orders them
+(`KubernetesPodOperator`, `airflow/dags/mlops.py`). The feature pipeline (Days 2-4) still runs on the host: the
+Iceberg metadata stores absolute `C:\...` paths, so the nodes cannot read it. The platform starts from an approved
+feature run.
+
+```powershell
+docker build -f pipeline/Dockerfile --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t mlops-pipeline:v1 .
+kind load docker-image mlops-pipeline:v1 --name lab           # kind has its own image store; pods use imagePullPolicy: Never
+kubectl apply -f pipeline\k8s\00-namespace.yaml -f pipeline\k8s\10-pvc.yaml
+kubectl apply -f pipeline\k8s\20-data-loader.yaml             # temporary pod that mounts the PVC
+# copy the approved run (Git Bash needs MSYS_NO_PATHCONV=1, see pitfalls; `kubectl cp` failed on Windows, tar over exec works)
+tar cf - -C data/features/day4_runs <RUN_ID> | kubectl -n pipeline exec -i data-loader -- tar xf - -C /app/data/features/day4_runs
+tar cf - -C data/features current.json       | kubectl -n pipeline exec -i data-loader -- tar xf - -C /app/data/features
+kubectl delete -f pipeline\k8s\20-data-loader.yaml
+kubectl apply -f pipeline\k8s\30-smoke-train.yaml             # optional: train without MLflow, proves image + data + memory
+.\airflow\start.ps1                                           # http://localhost:8080, admin / docker exec airflow cat /opt/airflow/standalone_admin_password.txt
+docker stop airflow                                           # free the RAM when not in use; docker start airflow brings it back
+```
+
+`airflow/kubeconfig` holds cluster-admin credentials: git-ignored, never commit it. DAG `loan_propensity_train` is
+train -> `training.promote` WITHOUT `--approve` (prints the gate; exit 1 = REFUSED, no retry). Nothing in Airflow may
+set `@production`: that stays a human step.
+
+Measured (21-22/10/2026): image 2.15 GB; smoke train about 1.3 GB RAM peak (limit 2 GB), 6 models in about 25 s;
+Airflow container about 1.56 GiB while starting, about 0.57 GiB idle; DAG run train -> gate 1 min 38 s (train pod 71 s
+including start, gate pod 9 s). The registered run carries `git_commit` of the image (28d9e2a) instead of `unknown`.
+
 ## Pitfalls already hit
 
 | Symptom | Cause | Fix in repo |
@@ -97,6 +127,10 @@ reconcile is 60 s + up to 60 s jitter, see the Day 9 section.
 | MLflow artifact upload fails, no bucket | bucket was never created by the chart | `buckets: [mlflow]` in `minio-values.yaml` |
 | Application `OutOfSync` right after creating it | auto-sync not enabled (form saved Prune/Self Heal without the Automatic switch) | `spec.syncPolicy.automated` present, see `argocd/serving-app.yaml` |
 | HPA `Degraded`, `kubectl top` says Metrics API not available | kind has no metrics-server; KServe creates an HPA per ISVC | `metrics-server` release in `helmfile.yaml` with `--kubelet-insecure-tls` |
+| `kubectl exec ... mkdir /app/data/...` creates a stray `/app/C:` dir, `kubectl cp` says `Cannot open` | Git Bash rewrites `/app/...` arguments into `C:/Program Files/Git/app/...` before kubectl.exe sees them | `export MSYS_NO_PATHCONV=1` first (or run from PowerShell); same for `docker run -v` / `docker exec` |
+| `kubectl apply` of a pod right after creating its namespace: `serviceaccount "default" not found` | the namespace's default ServiceAccount is created a moment later | wait for `kubectl -n <ns> get sa default`, then apply again |
+| PVC `Pending` after apply | `WaitForFirstConsumer`: the volume is created when the first pod uses it | expected; it turns `Bound` once `data-loader` is scheduled |
+| After a reboot: Docker API `Internal Server Error`, kubectl `connection refused`, pods `Unknown` | Docker Desktop and the kind node are still starting | wait until `kubectl get nodes` is Ready and `mlops`/`serving` pods are 1/1 (about 2 min) |
 | MLflow starts before Postgres/MinIO | releases installed in parallel | `needs:` + `helmDefaults.wait` in `helmfile.yaml` |
 
 ## Client settings
