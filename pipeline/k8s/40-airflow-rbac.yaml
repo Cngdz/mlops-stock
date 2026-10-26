@@ -1,0 +1,36 @@
+# Airflow (namespace airflow) starts the task pods in namespace pipeline with its in-cluster service account:
+# create/watch/delete pods and read their logs there, nothing else, nowhere else.
+# LocalExecutor runs tasks inside the scheduler pod (SA airflow-scheduler); airflow-worker is listed for a later
+# switch to the Kubernetes/Celery executor.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: airflow-pod-launcher
+  namespace: pipeline
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: airflow-pod-launcher
+  namespace: pipeline
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: airflow-pod-launcher
+subjects:
+  - kind: ServiceAccount
+    name: airflow-scheduler
+    namespace: airflow
+  - kind: ServiceAccount
+    name: airflow-worker
+    namespace: airflow

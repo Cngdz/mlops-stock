@@ -1,8 +1,8 @@
-"""Iceberg catalog for in-cluster tables (predictions, drift, evaluation).
+"""Iceberg catalog of every in-cluster table: Gold (namespace gold), feature store (features), monitoring.
 
 Catalog = PyIceberg SqlCatalog stored in the Postgres database `iceberg_catalog` (the Postgres that already backs
 MLflow); data files live in MinIO under s3://warehouse/. Locations are s3:// URIs, so pods and the host read the
-same tables. The Day 3-4 source/feature tables stay in the local SQLite catalog (data/catalog_full).
+same tables. The old local SQLite catalog (data/catalog_full) is only read once by scripts/migrate_gold.py.
 
 Defaults = the host port-forwards (infra/port-forward.ps1); pods override them with in-cluster addresses.
 """
@@ -14,6 +14,7 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.catalog.sql import SqlCatalog
 
 NAMESPACE = "monitoring"
+FEATURES_NAMESPACE = "features"
 
 
 def load() -> Catalog:

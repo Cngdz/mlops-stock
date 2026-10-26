@@ -1,22 +1,38 @@
-# Day 13 monitoring settings. Thresholds follow docs/timelinee/overview.md (monitoring section), which still marks
-# them [TODO] pending mentor confirmation: change them here, not in code.
+# Monitoring settings, one entry per use case (pipeline.predict / drift / evaluate --usecase <name>).
+# Thresholds follow docs/timelinee/overview.md (monitoring section), which still marks them [TODO] pending mentor
+# confirmation: change them here, not in code.
+#
+# drift.reference_date: a day the production models learned from (last day of the train split, 2025-02-01..
+#   2025-06-30). drift.severity: upper bounds, inclusive, of Drift Ratio = drifted features / model features
+#   (Evidently column-level): 0 -> none, <= medium -> medium, <= high -> high, above -> critical.
+# drift.retrain_cooldown_days: critical drift retrains at most once per cooldown; retraining on unchanged data
+#   cannot fix a lasting drift, it only piles up versions.
+# evaluate: absolute drop of live ROC-AUC vs the AUC recorded at training (version tag test_roc_auc).
 
-usecase: loan_propensity
+usecases:
+  loan_propensity:
+    drift:
+      reference_date: "2025-06-30"
+      severity: {none: 0.0, medium: 0.20, high: 0.50}
+      retrain_cooldown_days: 7
+    evaluate:
+      warn_drop: 0.05
+      retrain_drop: 0.10
 
-drift:
-  # Reference = last snapshot of the train split (2025-02-01..2025-06-30) the production models learned from.
-  reference_date: "2025-06-30"
-  # Drift Ratio = drifted features / all model features (Evidently column-level result).
-  # Upper bounds, inclusive: ratio 0 -> none, <= 0.20 -> medium, <= 0.50 -> high, above -> critical.
-  severity:
-    none: 0.0
-    medium: 0.20
-    high: 0.50
-  # critical triggers retraining, but the training data only changes when a new feature run is published from the
-  # host. Without a cooldown a lasting drift would retrain every day on the same data.
-  retrain_cooldown_days: 7
+  overdue_risk:            # scored rows: overdue_eligible = 1 (segments lu, au)
+    drift:
+      reference_date: "2025-06-30"
+      severity: {none: 0.0, medium: 0.20, high: 0.50}
+      retrain_cooldown_days: 7
+    evaluate:
+      warn_drop: 0.05
+      retrain_drop: 0.10
 
-evaluate:
-  # Absolute drop of live ROC-AUC vs the AUC recorded at training (version tag test_roc_auc).
-  warn_drop: 0.05
-  retrain_drop: 0.10
+  campaign_response:       # scored rows: the DELIVERED sends of the day (about 100 a day: drift is noisier)
+    drift:
+      reference_date: "2025-06-30"
+      severity: {none: 0.0, medium: 0.20, high: 0.50}
+      retrain_cooldown_days: 7
+    evaluate:
+      warn_drop: 0.05
+      retrain_drop: 0.10

@@ -37,8 +37,10 @@ SELECT * EXCLUDE(ol_reset),
        sum(over_limit) OVER (PARTITION BY master_account, ol_reset ORDER BY report_date) AS over_limit_streak
 FROM panel_reset;
 
+-- EXCLUDE: without it the running max below would be renamed last_campaign_date_1 and scoring_features would read
+-- the per-day value (campaign on D or NULL), i.e. days_since_last_campaign = 0/365 instead of the real gap.
 CREATE TABLE windowed AS
-SELECT *, sum(trades) OVER w7 AS trade_count_7d, sum(trades) OVER w30 AS trade_count_30d,
+SELECT * EXCLUDE(last_campaign_date), sum(trades) OVER w7 AS trade_count_7d, sum(trades) OVER w30 AS trade_count_30d,
     sum(turnover) OVER w7 AS total_trading_amount_7d, sum(turnover) OVER w30 AS total_trading_amount_30d,
     sum(CASE WHEN trades>0 THEN 1 ELSE 0 END) OVER w30 AS active_trading_days_30d,
     sum(events) OVER w30 AS recent_events,

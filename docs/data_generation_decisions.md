@@ -1135,3 +1135,19 @@ Không tự ý thay đổi:
 - Sinh `margin_balance_daily` độc lập với `margin_cash_flow`.
 
 Mọi thay đổi phải tạo config/version mới và cập nhật lại tài liệu này.
+
+### 14.7 Hiệu chỉnh tín hiệu mạnh (generator 0.3.0, calibration v4)
+
+Mục tiêu: dữ liệu synthetic có tín hiệu đủ rõ để model dự đoán từ 24 đặc trưng Gold-derived đạt ROC-AUC cao và ổn định qua train / validation / test. Thay đổi so với bản trước, tất cả nằm trong `data_generation/generate_all.py`:
+
+- Công thức §8.1 dùng `SIGNAL`: `p_margin_event = sigmoid(intercept + k * (w_act*activity + w_asset*z_asset + w_cash*z_cash + w_aff*margin_affinity + w_wealth*wealth_level + w_risk*risk_appetite + campaign_logit + noise*day_noise))`.
+- `z_asset = (ln(asset_value) - 17.5) / 0.7` và `z_cash = (cash / asset_value - 0.4) / 0.15`, cắt trong [-3, 3]; cả hai quan sát được trong Gold.
+- Giá trị: `k=6`, `w_act=0.5`, `w_asset=1.0`, `w_cash=0.7`, các đặc tính ẩn `w_aff = w_wealth = w_risk = 0`, `noise=0.05` (nhân với `day_noise` ~ N(0, 0.2)).
+- Tần suất giao dịch: `+1.0` vào logit xác suất giao dịch hằng ngày (`trade_boost`), để điều kiện "có lệnh BUY trong 7 ngày" thường xuyên thoả.
+- Tỷ lệ event hợp lệ: 0,97 (trước đó 0,85).
+- `repayment_probability = 0.30` (trước đó 0,10) để khách hàng trả nợ và quay lại nhóm `lu` thường hơn, nhóm `lu` đủ dữ liệu huấn luyện.
+- Intercept (nu, lu, au) = (-33,5; -25,5; -38,5) trong `data/generation_calibration_v4.json`. Tỷ lệ nhãn dương đo trên toàn bộ 5.000 tài khoản: nu 14,4%, lu 27,7%, au 37,7% (sai số ≤ 0,03 so với mục tiêu 15% / 25% / 35%).
+
+Chạy lại: `python -m data_generation.generate_all --num-accounts 5000 --output data/generated/day4_v4 --calibration data/generation_calibration_v4.json`.
+
+ROC-AUC test của model được chọn bởi `training.train` (LR hoặc LightGBM theo validation, cùng cách chia thời gian): loan_propensity nu 0,89 / lu 0,82 / au 0,83; overdue_risk lu 0,95 / au 0,87; campaign_response 0,91. ROC-AUC đo trên dữ liệu synthetic, không dùng để suy ra hiệu quả trên dữ liệu thật.

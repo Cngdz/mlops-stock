@@ -18,13 +18,18 @@ import pyarrow.parquet as pq
 from .generate_accounts import generate_accounts
 from .generate_extensions import CAMPAIGN_COLUMNS, generate_security_master, iter_portfolio_holdings
 
-GENERATOR_VERSION = "0.2.0"
+GENERATOR_VERSION = "0.3.0"
 START, END, SEED = date(2025, 1, 1), date(2026, 1, 30), 42
 LOCAL_TZ = timezone(timedelta(hours=7))
 HOLIDAYS = {date(2025, 1, 1), date(2025, 4, 30), date(2025, 5, 1), date(2025, 9, 2), date(2026, 1, 1)}
 SYMBOLS = [f"SYN{i:03d}" for i in range(1, 31)]
 COLLATERAL_RATIOS = {"LOW": .60, "MEDIUM": .70, "HIGH": .80}
-DEFAULT_INTERCEPTS = {"nu": -5.40, "lu": -4.60, "au": -3.80}
+# v4 "strong signal" calibration (docs/data_generation_decisions.md 14.7): intercepts below are for SIGNAL + repayment_probability .30.
+DEFAULT_INTERCEPTS = {"nu": -33.50, "lu": -25.50, "au": -38.50}
+# Weights of the daily margin-event logit (section 8.1). Observable state (activity, asset level, cash share) dominates the
+# latent traits, so a model that sees the Gold-derived features can rank customers well. k scales the whole non-intercept part.
+SIGNAL = {"k": 6.0, "w_aff": 0.0, "w_act": 0.5, "w_wealth": 0.0, "w_risk": 0.0, "w_asset": 1.0, "w_cash": 0.7,
+          "noise": 0.05, "trade_boost": 1.0, "valid": 0.97}
 TRADE_EFFECTS = {"nu": -.30, "lu": 0.0, "au": .30}
 # Decisions section 8.6. Campaigns are generated inside the daily state machine
 # and raise the margin-event logit for 14 days after a DELIVERED campaign.
@@ -172,7 +177,7 @@ def generate_events(accounts, prices, seed=SEED, intercepts=None, repayment_prob
                         active_campaign = (day, offer, channel, rate)
             day_tx = []
             if active and market:
-                probability = sigmoid(-2.4 + 1.6*account.trading_propensity + .5*account.activity_stability + TRADE_EFFECTS[segment] + trade_rng.normal(0, .25))
+                probability = sigmoid(-2.4 + 1.6*account.trading_propensity + .5*account.activity_stability + TRADE_EFFECTS[segment] + SIGNAL["trade_boost"] + trade_rng.normal(0, .25))
                 count = min(20, int(trade_rng.poisson(min(8, max(.2, .2 + 5*probability))))) if trade_rng.random() < probability else 0
                 for _ in range(count):
                     symbol = SYMBOLS[int(trade_rng.integers(len(SYMBOLS)))]
@@ -205,11 +210,16 @@ def generate_events(accounts, prices, seed=SEED, intercepts=None, repayment_prob
                 if posted:
                     debt -= amount
                     repaid = amount
-            probability = sigmoid(intercepts[segment] + 1.4*account.margin_affinity + activity + .6*account.wealth_level + .4*account.risk_appetite + campaign_logit + margin_noise[offset])
+            z_asset = max(-3, min(3, (math.log(max(asset, 1_000_000)) - 17.5) / .7))
+            z_cash = max(-3, min(3, (cash / max(asset, 1) - .4) / .15))
+            probability = sigmoid(intercepts[segment] + SIGNAL["k"] * (
+                SIGNAL["w_aff"]*account.margin_affinity + SIGNAL["w_act"]*activity + SIGNAL["w_wealth"]*account.wealth_level
+                + SIGNAL["w_risk"]*account.risk_appetite + SIGNAL["w_asset"]*z_asset + SIGNAL["w_cash"]*z_cash
+                + campaign_logit + SIGNAL["noise"]*margin_noise[offset]))
             if active and market and last_buy is not None and (day-last_buy[0]).days <= 6 and u[2] < probability:
                 posted = u[3] >= .02
                 product, flow, deliver, amount = "OTHER", "OTHER", "OTHER", 0
-                valid = u[4] < .85
+                valid = u[4] < SIGNAL["valid"]
                 if valid:
                     available = max(0, limit-debt)
                     if available >= 1_000_000:
@@ -314,7 +324,7 @@ def main():
     metadata = {
         "generator_version": GENERATOR_VERSION, "seed": SEED, "raw_start": START.isoformat(), "raw_end": END.isoformat(),
         "num_accounts": args.num_accounts, "intercepts": intercepts, "calibration": calibration,
-        "campaign_config": CAMPAIGN_CONFIG, "rows": frames_rows,
+        "campaign_config": CAMPAIGN_CONFIG, "signal": SIGNAL, "rows": frames_rows,
         # Decisions 9.2: holdings are NOT reconciled with asset_value; recorded for transparency only.
         "portfolio_vs_asset_value": {
             "median_ratio_sample": float(ratio_all.median()) if len(ratio_all) else None,

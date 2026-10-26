@@ -1,11 +1,13 @@
 """Deployer entry point.
 
+In the cluster it runs as Deployment mlops/deployer (deployer/k8s/deployer.yaml) with --loop: GITHUB_TOKEN from
+Secret deployer-github, MLflow and MinIO through their service DNS names, kubectl through the pod's service
+account (read-only on InferenceServices). Logs: kubectl -n mlops logs -f deploy/deployer
+
+From a workstation (debugging, dry runs) with the port-forwards of infra/port-forward.ps1:
   uv run --env-file .env python -m deployer --dry-run             # show what would be committed
   uv run --env-file .env python -m deployer                       # one round
-  uv run --env-file .env python -m deployer --loop                # sync every 60 s, verify every 600 s
-
-Needs GITHUB_TOKEN (fine-grained, Contents read/write on the repo), the MLflow (5050) and MinIO (9000)
-port-forwards (infra/port-forward.ps1), and kubectl for the convergence check (--verify-every 0 turns it off).
+Never run a second --loop next to the Deployment: two writers race on the same files.
 """
 from __future__ import annotations
 

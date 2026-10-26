@@ -1,14 +1,16 @@
-"""Day 13 batch jobs: the pure parts (joins, segment routing, severity, retrain decision, evaluation status)."""
+"""Batch jobs: the pure parts (joins, segment routing, severity, retrain decision, evaluation status, settings)."""
 import datetime as dt
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from pipeline.common import assemble, date_range
+from features.store import CAMPAIGN_DATASET, EVENT_KEY, assemble
+from pipeline.common import date_range, load_settings
 from pipeline.drift import column_results, severity_for, should_retrain
-from pipeline.evaluate import evaluate, status_for
-from pipeline.predict import SCHEMA, score_segments, to_arrow
+from pipeline.evaluate import evaluate, read_labels, status_for
+from pipeline.predict import EVENT_SCHEMA, SCHEMA, schema_for, score_segments, to_arrow
+from training.config import load_usecases
 
 BOUNDS = {"none": 0.0, "medium": 0.20, "high": 0.50}
 DAY = dt.date(2026, 1, 30)
@@ -114,3 +116,52 @@ def test_evaluate_per_model_version():
     out = evaluate(joined, {("m_au", "4"): 0.70, ("m_lu", "2"): 0.60}, "y", 0.05, 0.10).set_index("segment")
     assert out.loc["au", "live_auc"] == pytest.approx(1.0) and out.loc["au", "status"] == "OK"
     assert out.loc["lu", "status"] == "NO_LABELS"  # a single class: AUC undefined, never reported as OK
+
+
+
+def test_one_model_use_case_scores_every_row_and_keeps_the_send_key():
+    rows = _snapshot().assign(campaign_event_id=["e1", "e2", "e3", "e4"])
+    scored, unscored = score_segments(rows, {"all": ("m_all", "3", ConstantModel(0.3))}, ["f1"], None, (EVENT_KEY,))
+    assert unscored == [] and set(scored["segment"]) == {"all"} and len(scored) == 4
+    table = to_arrow(scored, "run1", dt.datetime(2026, 1, 31), EVENT_SCHEMA)
+    assert table.column(EVENT_KEY).to_pylist() == ["e1", "e2", "e3", "e4"]
+
+
+def test_schema_per_use_case():
+    usecases = load_usecases()
+    assert schema_for(usecases["campaign_response"]) is EVENT_SCHEMA
+    assert schema_for(usecases["loan_propensity"]) is SCHEMA and schema_for(usecases["overdue_risk"]) is SCHEMA
+
+
+# ---- settings ----
+
+def test_every_use_case_has_monitoring_settings():
+    for name in load_usecases():
+        settings = load_settings(name)
+        assert {"reference_date", "severity", "retrain_cooldown_days"} <= set(settings["drift"])
+        assert {"warn_drop", "retrain_drop"} <= set(settings["evaluate"])
+    with pytest.raises(SystemExit):
+        load_settings("no_such_usecase")
+
+
+# ---- evaluate labels ----
+
+def test_labels_per_use_case(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pq.write_table(pa.table({"master_account": ["a", "b", "a"], "report_date": [DAY, DAY, dt.date(2026, 2, 5)],
+                             "loan_label_next": pa.array([1, 0, 1], pa.int8()),
+                             "overdue_label_next_30d": pa.array([None, 1, 0], pa.int8())}),
+                   tmp_path / "loan_overdue_labels.parquet")
+    pq.write_table(pa.table({"campaign_event_id": ["e1", "e2"], "master_account": ["a", "b"],
+                             "report_date": [DAY, DAY], "campaign_response_label_14d": pa.array([1, 0], pa.int8())}),
+                   tmp_path / "campaign_training_dataset.parquet")
+    usecases = load_usecases()
+    labels, keys = read_labels(tmp_path, usecases["overdue_risk"], DAY, DAY)
+    assert keys == ["master_account", "score_date"] and labels["master_account"].tolist() == ["b"]  # NULL = not eligible
+    labels, keys = read_labels(tmp_path, usecases["loan_propensity"], DAY, DAY)
+    assert len(labels) == 2  # the 2026-02-05 row is outside the window
+    labels, keys = read_labels(tmp_path, usecases["campaign_response"], DAY, DAY)
+    assert keys == [EVENT_KEY] and list(labels.columns) == [EVENT_KEY, "campaign_response_label_14d"]
+    assert usecases["campaign_response"].dataset == CAMPAIGN_DATASET

@@ -1,7 +1,13 @@
-# Models the deployer keeps in sync with @production. One InferenceService (~1 GB RAM) per entry:
-# add lines only while the cluster has memory for them.
+# Models the deployer keeps in sync with @production: the 6 models of the 3 use cases (docs 1.3).
+# One InferenceService (~1 GB RAM) per entry once its @production exists; an entry without @production is
+# skipped (nothing is deployed). Comment lines out while the cluster lacks the memory for all six.
 repo: Cngdz/mlops-stock
 branch: master
 namespace: serving
 models:
   - loan_propensity_au
+  - loan_propensity_lu
+  - loan_propensity_nu
+  - overdue_risk_au
+  - overdue_risk_lu
+  - campaign_response_all

@@ -1,4 +1,4 @@
-"""Read an approved Day 4 run and hand out train/validation/test frames per segment."""
+"""Read an approved training run (features.build_training) and hand out train/validation/test frames per segment."""
 from __future__ import annotations
 
 import json
@@ -22,7 +22,7 @@ def resolve_run_dir(run_dir: str | Path | None = None) -> Path:
 
 
 def check_run(run_dir: Path) -> dict:
-    """Refuse to train on a run that did not pass the Day 4 quality gate."""
+    """Refuse to train on a run that did not pass the training-data quality gate."""
     quality = json.loads((run_dir / "quality_report.json").read_text(encoding="utf-8"))
     if quality.get("status") != "PASS":
         raise RuntimeError(f"{run_dir.name}: quality gate is {quality.get('status')}, not PASS")

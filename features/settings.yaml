@@ -1,0 +1,24 @@
+# Feature Store settings. Thresholds live here, not in code.
+
+gold_namespace: gold          # Iceberg namespace of the 8 Gold tables (catalog Postgres iceberg_catalog, s3://warehouse)
+lookback_days: 30             # Gold history read per day: 30-day windows reach T-29, debt_change_7d reaches T-7
+
+quality:
+  # Rows of day T / rows of the previous published day. The eligible population only grows by accounts reaching
+  # 30 days of age (measured on the synthetic year: 0.9986 .. 1.474 day over day), so a drop of more than 5%
+  # means lost source rows.
+  row_count_ratio: [0.95, 1.5]
+  max_null_rate: 0.0          # every contract column is required
+
+maintenance:
+  retention_months: 12        # counted back from the latest published report_date, not from the wall clock
+  snapshot_max_age_days: 7    # older snapshots are expired (the current one is always kept)
+  orphan_min_age_days: 3      # files younger than this may belong to a write in progress: never deleted
+
+training:
+  # Time split with embargo (docs 4.2). Rows outside these ranges are dropped: a 30-day label of the last train
+  # day must not reach into validation.
+  splits:
+    train: ["2025-02-01", "2025-06-30"]
+    validation: ["2025-07-31", "2025-09-30"]
+    test: ["2025-10-31", "2025-12-31"]

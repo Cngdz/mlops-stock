@@ -1,11 +1,14 @@
-"""Day 13 drift: compare the model features of a day with the training reference (Evidently, column-level).
+"""Drift: compare the model features of a day with the training reference (Evidently, column-level).
 
-  python -m pipeline.drift --date 2026-01-30                          # vs drift.reference_date: the official check
-  python -m pipeline.drift --date 2026-01-30 --reference 2026-01-29   # ad-hoc comparison (no MLflow tags)
-  python -m pipeline.drift --should-retrain --date 2026-01-30         # exit 0 = trigger retrain, 99 = skip
+  python -m pipeline.drift --usecase loan_propensity --date 2026-01-30          # vs drift.reference_date: official
+  python -m pipeline.drift --usecase loan_propensity --date 2026-01-30 --reference 2026-01-29   # ad-hoc, no tags
+  python -m pipeline.drift --usecase loan_propensity --should-retrain --date 2026-01-30   # exit 0 retrain, 99 skip
 
-Drift Ratio = drifted features / model features -> severity (monitoring.yaml). Result: monitoring.drift_<usecase>,
-HTML report in s3://warehouse/reports/drift/. The official check also tags each @production version with
+The rows compared are the ones the use case scores (features.store.usecase_rows): all accounts, the
+overdue_eligible ones, or the DELIVERED sends of the day. Drift Ratio = drifted features / model features ->
+severity (monitoring.yaml, entry of the use case). A day with no row to compare (no campaign sent) exits 99,
+a skip. Result: monitoring.drift_<usecase>, HTML report in
+s3://warehouse/reports/drift/<usecase>/. The official check also tags each @production version with
 monitoring.driftSeverity. Drift alone does not prove the model got worse (pipeline.evaluate does, with labels);
 it is the early warning available before the labels exist.
 """
@@ -24,7 +27,8 @@ import pyarrow as pa
 from pyiceberg.expressions import And, EqualTo
 
 from pipeline import catalog as lakehouse
-from pipeline.common import as_json, feature_run, load_settings, parse_date, read_snapshot, write_partition
+from features import store
+from pipeline.common import as_json, load_settings, parse_date, write_partition
 from training import registry
 from training.config import load_usecases
 
@@ -90,15 +94,19 @@ def upload_html(snapshot, key: str) -> str:
     return f"s3://warehouse/{key}"
 
 
-def run_check(day: dt.date, reference: dt.date, official: bool) -> str:
+def run_check(usecase: str, day: dt.date, reference: dt.date, official: bool) -> str:
     from evidently import Report
     from evidently.presets import DataDriftPreset
 
-    settings = load_settings()
-    usecase = settings["usecase"]
+    settings = load_settings(usecase)
     uc = load_usecases()[usecase]
-    run_dir, _ = feature_run()
-    ref, cur = read_snapshot(run_dir, reference)[uc.features], read_snapshot(run_dir, day)[uc.features]
+    catalog = lakehouse.load()
+    ref, cur = (store.usecase_rows(catalog, uc, d)[0][uc.features] for d in (reference, day))
+    if ref.empty:
+        raise SystemExit(f"{usecase}: the reference day {reference} has no rows; fix drift.reference_date")
+    if cur.empty:  # e.g. no campaign sent that day: nothing was scored, so there is nothing to compare
+        print(f"{usecase}: no rows on {day}, drift not checked")
+        sys.exit(SKIP_EXIT)
     snapshot = Report([DataDriftPreset(columns=uc.features)]).run(reference_data=ref, current_data=cur)
     columns = column_results(snapshot.dict())
     drifted = [c["column"] for c in columns if c["drifted"]]
@@ -111,7 +119,6 @@ def run_check(day: dt.date, reference: dt.date, official: bool) -> str:
         "drift_ratio": ratio, "severity": severity, "drifted_columns": as_json(drifted),
         "column_scores": as_json({c["column"]: round(c["score"], 4) for c in columns}), "report_uri": uri,
         "official": official, "checked_at": dt.datetime.now(dt.UTC).replace(tzinfo=None)}])
-    catalog = lakehouse.load()
     lakehouse.ensure_namespace(catalog)
     write_partition(catalog, f"{lakehouse.NAMESPACE}.drift_{usecase}",
                     pa.Table.from_pandas(row[SCHEMA.names], schema=SCHEMA, preserve_index=False), "current_date",
@@ -138,20 +145,21 @@ def last_training(client, usecase: str, segments: list[str]) -> dt.datetime | No
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--usecase", required=True)
     parser.add_argument("--date", type=parse_date, required=True)
     parser.add_argument("--reference", type=parse_date, help="override drift.reference_date (ad-hoc, no tags)")
     parser.add_argument("--should-retrain", action="store_true", help=f"exit 0 = retrain, {SKIP_EXIT} = skip")
     parser.add_argument("--cooldown-days", type=int, help="override drift.retrain_cooldown_days")
     args = parser.parse_args()
 
-    settings = load_settings()
+    usecase = args.usecase
+    settings = load_settings(usecase)
     official_ref = parse_date(settings["drift"]["reference_date"])
     if not args.should_retrain:
         reference = args.reference or official_ref
-        run_check(args.date, reference, official=reference == official_ref)
+        run_check(usecase, args.date, reference, official=reference == official_ref)
         return
 
-    usecase = settings["usecase"]
     uc = load_usecases()[usecase]
     rows = lakehouse.load().load_table(f"{lakehouse.NAMESPACE}.drift_{usecase}").scan(
         row_filter=And(EqualTo("current_date", args.date.isoformat()),

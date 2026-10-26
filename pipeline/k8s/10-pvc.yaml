@@ -1,5 +1,6 @@
-# Feature runs (input) and day6_runs (local copies of trained models) for the pods in this namespace.
-# The kind storage class binds on first use (WaitForFirstConsumer): Pending until a pod mounts it.
+# Training runs (features.build_training output, read by training.train / pipeline.evaluate), staging dirs of the
+# daily feature job and day6_runs (local copies of trained models) for the pods in this namespace. Storage classes
+# that bind on first use (WaitForFirstConsumer) keep it Pending until a pod mounts it.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

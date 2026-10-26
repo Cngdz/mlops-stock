@@ -9,6 +9,8 @@ repositories:
     url: https://argoproj.github.io/argo-helm
   - name: metrics-server
     url: https://kubernetes-sigs.github.io/metrics-server/
+  - name: apache-airflow
+    url: https://airflow.apache.org
 
 helmDefaults:
   wait: true          # sync returns only when pods are Ready (MLflow 3 image is large: first pull takes minutes)
@@ -65,3 +67,15 @@ releases:
     version: 3.14.0       # app v0.9.0
     values:
       - ./helm-values/metrics-server-values.yaml
+
+  # Orchestration (docs 2.1): scheduler + webserver in namespace airflow, DAGs pulled from Git by git-sync,
+  # every task a pod in namespace pipeline (KubernetesPodOperator, in-cluster config).
+  # Metadata DB = database `airflow` in the mlops Postgres (no extra Postgres, see airflow-values.yaml).
+  - name: airflow
+    namespace: airflow
+    chart: apache-airflow/airflow
+    version: 1.16.0       # Airflow 2.10.5, pinned again in the values
+    needs:
+      - mlops/postgres
+    values:
+      - ./helm-values/airflow-values.yaml

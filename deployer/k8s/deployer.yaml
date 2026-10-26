@@ -1,0 +1,76 @@
+# Deployer as a long-running Deployment in namespace mlops (docs 6.2): reads @production every 60 s, commits
+# serving/k8s/30-isvc-<model>.yaml to GitHub, checks the live InferenceServices every 600 s.
+# Not part of ArgoCD's path (serving/k8s): apply by hand, or via infra/bootstrap.ps1.
+# Needs, once:
+#   kubectl -n mlops create secret generic deployer-github --from-literal=token=<fine-grained token, Contents: read and write>
+#   kubectl -n mlops create secret docker-registry harbor-pull ...   (see infra/README.md)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: deployer
+  namespace: mlops
+---
+# verify only reads InferenceServices; the deployer never edits the cluster (ArgoCD does).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer-isvc-reader
+  namespace: serving
+rules:
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deployer-isvc-reader
+  namespace: serving
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: deployer-isvc-reader
+subjects:
+  - kind: ServiceAccount
+    name: deployer
+    namespace: mlops
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployer
+  namespace: mlops
+  labels: {app: deployer}
+spec:
+  replicas: 1                 # one writer: two loops would race on the same Git file (GitHub rejects with 409)
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: deployer}
+  template:
+    metadata:
+      labels: {app: deployer}
+    spec:
+      serviceAccountName: deployer
+      imagePullSecrets:
+        - name: harbor-pull
+      containers:
+        - name: deployer
+          image: harbor.local/mlops/mlops-deployer:v1    # <- your Harbor host
+          imagePullPolicy: Always
+          args: ["python", "-m", "deployer", "--loop", "--interval", "60", "--verify-every", "600"]
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: http://mlflow.mlops.svc.cluster.local
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: http://minio.mlops.svc.cluster.local:9000
+            - name: AWS_ACCESS_KEY_ID          # the MinIO chart's own root credentials Secret
+              valueFrom: {secretKeyRef: {name: minio, key: rootUser}}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: minio, key: rootPassword}}
+            - name: GITHUB_TOKEN
+              valueFrom: {secretKeyRef: {name: deployer-github, key: token}}
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            requests: {memory: 256Mi, cpu: 50m}
+            limits: {memory: 768Mi}

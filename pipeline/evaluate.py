@@ -1,9 +1,12 @@
-"""Day 13 evaluate: join stored predictions with the true labels once their 30-day window has closed.
+"""Evaluate: join stored predictions with the true labels once their window has closed.
 
-  python -m pipeline.evaluate --start 2025-12-25 --end 2025-12-31
+  python -m pipeline.evaluate --usecase loan_propensity --start 2025-12-25 --end 2025-12-31
 
-Live ROC-AUC per (segment, model_version) is compared with the AUC recorded at training (version tag test_roc_auc).
-Drop above evaluate.warn_drop -> WARN, above evaluate.retrain_drop -> RETRAIN. Results go to monitoring.eval_<usecase>.
+Labels come from the current training run (features.build_training, computed from Gold): loan_label_next and
+overdue_label_next_30d (30 days to mature) from loan_overdue_labels, joined on (master_account, day);
+campaign_response_label_14d (14 days) from campaign_training_dataset, joined on campaign_event_id. Live ROC-AUC per
+(segment, model_version) is compared with the AUC recorded at training (version tag test_roc_auc). Drop above
+evaluate.warn_drop -> WARN, above evaluate.retrain_drop -> RETRAIN. Results go to monitoring.eval_<usecase>.
 Caveat for this synthetic demo: labels end on 2025-12-31 and Oct-Dec 2025 is the test split the gate already used, so
 these numbers are not an independent hold-out.
 """
@@ -19,8 +22,11 @@ from pyiceberg.expressions import And, EqualTo, GreaterThanOrEqual, LessThanOrEq
 from sklearn.metrics import roc_auc_score
 
 from pipeline import catalog as lakehouse
-from pipeline.common import feature_run, load_settings, parse_date, write_partition
+from features.store import CAMPAIGN_DATASET, EVENT_KEY
+from pipeline.common import load_settings, parse_date, write_partition
 from training import registry
+from training.config import load_usecases
+from training.data import resolve_run_dir
 
 SCHEMA = pa.schema([
     ("window_start", pa.date32()),
@@ -48,6 +54,22 @@ def status_for(drop: float | None, warn_drop: float, retrain_drop: float) -> str
     return "OK"
 
 
+def read_labels(run_dir, uc, start: dt.date, end: dt.date) -> tuple[pd.DataFrame, list[str]]:
+    """(labels with a closed window in [start, end], join keys with the predictions)."""
+    if uc.dataset == CAMPAIGN_DATASET:
+        source, columns, keys = "campaign_training_dataset", [EVENT_KEY], [EVENT_KEY]
+    else:
+        source, columns, keys = "loan_overdue_labels", ["master_account", "report_date"], ["master_account", "score_date"]
+    labels = pq.read_table(run_dir / f"{source}.parquet", columns=columns + [uc.label],
+                           filters=[("report_date", ">=", start), ("report_date", "<=", end)]).to_pandas()
+    labels = labels.dropna(subset=[uc.label])  # overdue_label_next_30d is NULL outside overdue_eligible
+    labels = labels.rename(columns={"report_date": "score_date"})
+    for key in keys:
+        if key != "score_date":
+            labels[key] = labels[key].astype(str)
+    return labels, keys
+
+
 def evaluate(joined: pd.DataFrame, reference_auc: dict, label: str, warn_drop: float, retrain_drop: float,
              ) -> pd.DataFrame:
     """joined: predictions + label column. reference_auc: (model_name, version) -> AUC at training. Pure."""
@@ -65,27 +87,26 @@ def evaluate(joined: pd.DataFrame, reference_auc: dict, label: str, warn_drop: f
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--usecase", required=True)
     parser.add_argument("--start", type=parse_date, required=True)
     parser.add_argument("--end", type=parse_date, required=True)
     args = parser.parse_args()
 
-    settings = load_settings()
-    usecase, cfg = settings["usecase"], settings["evaluate"]
-    label = "loan_label_next"
+    usecase, cfg = args.usecase, load_settings(args.usecase)["evaluate"]
+    uc = load_usecases()[usecase]
+    label = uc.label
     catalog = lakehouse.load()
     preds = catalog.load_table(f"{lakehouse.NAMESPACE}.pred_{usecase}").scan(
         row_filter=And(GreaterThanOrEqual("score_date", args.start.isoformat()),
                        LessThanOrEqual("score_date", args.end.isoformat()))).to_pandas()
     if preds.empty:
         raise SystemExit(f"no predictions between {args.start} and {args.end}: run pipeline.predict first")
-    run_dir, _ = feature_run()
-    labels = pq.read_table(run_dir / "loan_overdue_labels.parquet",
-                           columns=["master_account", "report_date", label],
-                           filters=[("report_date", ">=", args.start), ("report_date", "<=", args.end)]).to_pandas()
-    labels = labels.assign(master_account=labels["master_account"].astype(str)).rename(
-        columns={"report_date": "score_date"})
-    joined = preds.merge(labels, on=["master_account", "score_date"], how="inner")
+    labels, keys = read_labels(resolve_run_dir(), uc, args.start, args.end)
+    joined = preds.merge(labels, on=keys, how="inner")
     print(f"{len(preds)} predictions, {len(joined)} with a closed label window")
+    if joined.empty:
+        raise SystemExit(f"{usecase}: no prediction of {args.start}..{args.end} has a label yet "
+                         f"(labels of the current training run end at its label_end minus the label window)")
 
     client = registry.configure()
     reference = {}

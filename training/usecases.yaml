@@ -1,9 +1,9 @@
-# Day 6 training config. One entry per use case in usecase_registry.json.
-# Features are an explicit ALLOWLIST: a column added to the Day 4 output never reaches a model
+# Day 6 training config. One entry per use case (3 use cases, 6 models: docs 1.3).
+# Features are an explicit ALLOWLIST: a column added to the fs_* contract never reaches a model
 # until it is listed here. config.py rejects labels, keys, split and excluded columns.
 #
 # segment_column: one binary model per value in `segments`; omit `segments` for a single model.
-# class_weights:  dotted path into class_weights.json (fit on train in Day 4, reused as-is).
+# class_weights:  dotted path into class_weights.json (fit on train by features.build_training, reused as-is).
 # threshold:      chosen on validation. max_f1 | min_recall (value = recall floor).
 
 defaults:
