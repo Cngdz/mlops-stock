@@ -1,9 +1,7 @@
 # Training/batch image: same Python and the same locked library versions as the host (uv.lock),
 # so models trained here load in the mlserver-mlflow serving image (pickle stores object state,
 # not class code: a different sklearn breaks loading).
-# Build and push (repo root), then every pod pulls it from the cluster registry:
-#   docker build -f pipeline/Dockerfile --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t harbor.local/mlops/mlops-pipeline:v1 .
-#   docker push harbor.local/mlops/mlops-pipeline:v1
+# Build (repo root):  docker build -f pipeline/Dockerfile --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t mlops-pipeline:v1 .
 FROM python:3.12-slim
 
 # LightGBM needs the OpenMP runtime
@@ -19,8 +17,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY training ./training
-COPY features ./features
 COPY pipeline/*.py pipeline/monitoring.yaml ./pipeline/
 ARG GIT_COMMIT=unknown
 ENV GIT_COMMIT=$GIT_COMMIT
-# data/ is NOT in the image: training runs live on the PVC at /app/data; Gold and fs_* are Iceberg tables in MinIO
+# data/ is NOT in the image: it is mounted from the PVC at /app/data

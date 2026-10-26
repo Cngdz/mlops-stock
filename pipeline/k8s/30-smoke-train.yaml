@@ -10,12 +10,10 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      imagePullSecrets:
-        - name: harbor-pull
       containers:
         - name: train
-          image: harbor.local/mlops/mlops-pipeline:v1    # <- your Harbor host
-          imagePullPolicy: Always
+          image: mlops-pipeline:v1
+          imagePullPolicy: Never
           command: ["python", "-m", "training.train", "--usecase", "loan_propensity", "--no-mlflow"]
           resources:
             requests:

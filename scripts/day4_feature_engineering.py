@@ -1,8 +1,4 @@
-"""LEGACY full rebuild (Day 4): Iceberg -> scoring features + training candidates -> quality gate -> feature files.
-
-Not used by the platform any more: the daily feature store is features/ (one report_date partition per day, docs
-chapter 3) and training data is features.build_training. Kept as the reference implementation that
-tests/test_features.py compares the incremental job against, and for the Feast experiment (tests/test_feast.py).
+"""Iceberg -> scoring features + training candidates -> quality gate -> versioned feature tables.
 
 fs_* tables come from scoring_features (every eligible day up to raw_end, no labels);
 training_dataset comes from candidate (features JOIN labels, complete label window, split).

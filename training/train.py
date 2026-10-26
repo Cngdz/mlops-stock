@@ -1,4 +1,4 @@
-"""Day 6-7: train LR baseline + LightGBM per (use case, segment) on an approved training run.
+"""Day 6-7: train LR baseline + LightGBM per (use case, segment) on an approved Day 4 run.
 
 Usage:  python -m training.train                                 # all use cases, run in current.json
         python -m training.train --usecase loan_propensity --run-dir data/features/day4_runs/<id>
@@ -154,7 +154,7 @@ def print_result(result: SegmentResult) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--usecase", action="append", help="repeatable; default: all in usecases.yaml")
-    parser.add_argument("--run-dir", help="features.build_training run dir; default: data/features/current.json")
+    parser.add_argument("--run-dir", help="Day 4 run dir; default: data/features/current.json")
     parser.add_argument("--out", type=Path, default=OUT_ROOT)
     parser.add_argument("--no-mlflow", action="store_true", help="Day 6 mode: local artifacts only")
     parser.add_argument("--train-cutoff-days", type=int, default=0,

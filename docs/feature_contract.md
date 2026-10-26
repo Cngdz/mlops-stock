@@ -1,10 +1,6 @@
-# Hợp đồng dữ liệu đặc trưng (fs-v6)
+# Hợp đồng dữ liệu ngày 4
 
-Mô tả mã nguồn hiện tại của Feature Store theo ngày ([features/](../features/), tài liệu luồng chương 3) và dữ liệu
-huấn luyện (`features.build_training`). Nguồn chuẩn của danh sách cột là `GROUPS` trong
-[features/common.py](../features/common.py): bước `features.quality` so schema Iceberg của từng bảng với nó mỗi ngày,
-và `tests/test_features.py` kiểm tra tài liệu này liệt kê đủ mọi cột. Đổi một cột = sửa `GROUPS`, sửa mục 3, tăng
-`FEATURE_CONTRACT`. Các mốc cố định thuộc bộ synthetic 2025.
+Tài liệu mô tả mã nguồn hiện tại trong `scripts/day4_features.sql` và `scripts/day4_feature_engineering.py`. Các mốc cố định thuộc bộ synthetic 2025; `--raw-end` điều chỉnh độ đủ của nhãn, không tự đổi split sang năm khác.
 
 ## 1. Đơn vị của một dòng
 
@@ -14,12 +10,12 @@ Một snapshot training phải đáp ứng:
 
 - Ngày D nằm trong 2025-02-01 đến 2025-12-31 và thuộc một split.
 - Tài khoản đã mở ít nhất 30 ngày; D trước ngày đóng hoặc ngày bắt đầu dormant.
-- Có dữ liệu balance đầy đủ từ ngày mở đến ngày Gold cuối cùng (trạng thái mang sang ngày sau cần mỗi ngày một dòng).
-- D+30 không vượt quá ngày Gold cuối cùng (`label_end`, hiện 2026-01-30).
+- Có dữ liệu balance đầy đủ từ ngày mở đến `raw_end`.
+- D+30 không vượt quá `raw_end`, mặc định 2026-01-30.
 
 Trạng thái `account_status` ở cuối kỳ không được dùng để loại toàn bộ lịch sử: một tài khoản đã đóng cuối năm vẫn có thể có snapshot hợp lệ trước ngày đóng.
 
-## 2. Nguồn Gold
+## 2. Nguồn tối thiểu
 
 | Bảng | Khóa | Các cột pipeline sử dụng |
 |---|---|---|
@@ -38,82 +34,27 @@ Ba nguồn mở rộng phục vụ các use case dùng chung feature platform:
 
 Các ngày phải có kiểu `DATE`, khóa/enum có kiểu chuỗi, số lượng/tiền có kiểu số. Timestamp hỗ trợ kiểu timestamp hoặc chuỗi parse được; nguồn chuẩn cần timezone rõ ràng. Gate không thay thế việc kiểm tra timezone của dữ liệu đến muộn hoặc timestamp thiếu offset.
 
-Gold nằm trong namespace `gold` của catalog Postgres `iceberg_catalog` (`scripts/migrate_gold.py`), hệ thống chỉ đọc. `features.check_source --date T` trả FAIL khi thiếu bảng/cột, sai nhóm kiểu, hoặc bảng snapshot ngày (`margin_balance_daily`, `portfolio_holding_daily`, `stock_price_daily`) chưa tới T; khi đó không tính gì. Null ở cột lifecycle tùy chọn vẫn hợp lệ. Kiểm tra sâu trên chính Gold (đối soát dư nợ với dòng tiền, vòng đời giao dịch) thuộc tầng Gold và nằm ngoài phạm vi; đầu ra fs_* có cổng riêng ở mục 7, dữ liệu huấn luyện ở mục 5.
+Thiếu bảng/cột hoặc sai nhóm kiểu dữ liệu sẽ trả source FAIL trước khi normalize/build. Null ở cột lifecycle tùy chọn vẫn hợp lệ; các ràng buộc khóa, enum, giá trị và đối soát dư nợ được kiểm tra tiếp trong quality gate.
 
-## 3. Feature (bảng fs_*)
+## 3. Feature
 
-### Quy ước chung
-
-- Mỗi bảng là một bảng Iceberg `features.<tên>` trong catalog Postgres `iceberg_catalog`, dữ liệu ở
-  `s3://warehouse/features.db/<tên>/`, partition identity theo `report_date`.
-- Khoá: `master_account` (string) + `report_date` (date). Mỗi ngày đúng một dòng cho mỗi tài khoản đủ điều kiện:
-  ACTIVE (chưa đóng, chưa ngủ đông) và đã mở ít nhất 30 ngày. Sáu bảng có cùng tập khoá trong mỗi ngày.
-- `event_timestamp` (timestamptz, UTC): 23:59:59 giờ Việt Nam của `report_date`.
-- Mọi cột bắt buộc, không null. Cửa sổ tính theo ngày lịch giờ Việt Nam: 7 ngày = D−6..D, 30 ngày = D−29..D.
-- Không có nhãn trong fs_*. Nhãn chỉ được tính khi dựng dữ liệu huấn luyện (`features.build_training`).
-- Bảng nội bộ `features.fs_state` (history_count, over_limit_streak, last_campaign_date theo ngày) chỉ để ngày
-  sau tiếp tục tính, không phải đầu vào model và không thuộc hợp đồng này.
-
-### `fs_demographic`
-
-| Cột | Kiểu Iceberg | Ý nghĩa |
+| Nhóm | Feature | Cách tính |
 |---|---|---|
-| `account_age_days` | long | Số ngày từ ngày mở tài khoản đến D (≥ 30) |
-| `margin_segment` | string | `au`: còn dư nợ hoặc có giải ngân hợp lệ trong 30 ngày; `lu`: từng giải ngân nhưng không thuộc au; `nu`: chưa từng |
-
-### `fs_trading_behavior`
-
-| Cột | Kiểu Iceberg | Ý nghĩa |
-|---|---|---|
-| `trade_count_7d` | long | Số lệnh khớp D−6..D |
-| `trade_count_30d` | long | Số lệnh khớp D−29..D |
-| `total_trading_amount_7d` | long | Tổng giá trị khớp D−6..D |
-| `total_trading_amount_30d` | long | Tổng giá trị khớp D−29..D |
-| `active_trading_days_30d` | long | Số ngày có giao dịch trong D−29..D (0..30) |
-
-### `fs_margin_balance`
-
-| Cột | Kiểu Iceberg | Ý nghĩa |
-|---|---|---|
-| `margin_debt` | long | Dư nợ margin cuối ngày D |
-| `margin_limit` | long | Hạn mức margin |
-| `margin_utilization_ratio` | double | `margin_debt / margin_limit` (0 khi hạn mức 0) |
-| `debt_change_7d` | long | Dư nợ D trừ dư nợ đúng ngày D−7 |
-| `over_limit_streak` | long | Số ngày lịch liên tiếp dư nợ vượt hạn mức, tính đến D |
-| `over_limit_days_30d` | long | Số ngày vượt hạn mức trong D−29..D (0..30) |
-| `margin_status` | string | Trạng thái margin cuối ngày D (Gold). Không phải đặc trưng model: xác định `overdue_eligible` (segment ≠ nu và chưa OVERDUE tại D) giống nhau khi huấn luyện và khi chấm |
-
-### `fs_asset_balance`
-
-| Cột | Kiểu Iceberg | Ý nghĩa |
-|---|---|---|
-| `cash_balance` | long | Tiền mặt |
-| `asset_value` | long | Giá trị tài sản |
-| `collateral_value` | long | Tài sản đảm bảo = `asset_value` × 0,60 / 0,70 / 0,80 theo risk_profile LOW / MEDIUM / HIGH |
-| `cash_to_asset_ratio` | double | `cash_balance / asset_value` (0 khi tài sản 0) |
-| `NAV` | long | `asset_value + cash_balance − margin_debt` |
-
-### `fs_portfolio`
-
-| Cột | Kiểu Iceberg | Ý nghĩa |
-|---|---|---|
-| `portfolio_value` | long | Tổng giá trị thị trường danh mục |
-| `holding_symbol_count` | long | Số mã đang nắm giữ |
-| `portfolio_concentration` | double | Tỷ trọng lớn nhất của một mã (0..1) |
-| `unrealized_loss_ratio` | double | Tỷ trọng giá trị các mã đang lỗ (0..1) |
-| `risky_asset_ratio` | double | Tỷ trọng giá trị các mã rủi ro HIGH (0..1) |
-
-### `fs_campaign`
-
-| Cột | Kiểu Iceberg | Ý nghĩa |
-|---|---|---|
-| `campaign_count_30d` | long | Số chiến dịch (khác FAILED) nhận trong D−29..D |
-| `days_since_last_campaign` | long | Số ngày từ chiến dịch gần nhất đến D, chặn 365; 365 khi chưa từng nhận |
-| `has_campaign_history` | long | 1 nếu đã từng nhận chiến dịch đến D, ngược lại 0 |
-
-Ghi chú fs-v6: trước phiên bản này `days_since_last_campaign` / `has_campaign_history` chỉ phản ánh "có chiến
-dịch trong chính ngày D" (lỗi trùng tên cột trong SQL cũ). Model huấn luyện trên dữ liệu trước fs-v6 cần huấn
-luyện lại trên dữ liệu mới trước khi dùng cho điểm hằng ngày.
+| `fs_demographic` | `account_age_days` | D trừ ngày mở tài khoản |
+| | `margin_segment` | `nu`, `lu`, `au` theo lịch sử đến D |
+| `fs_trading_behavior` | `trade_count_7d`, `trade_count_30d` | Số giao dịch trong D−6..D và D−29..D |
+| | `total_trading_amount_7d`, `total_trading_amount_30d` | Tổng `trade_value` trong hai cửa sổ tương ứng |
+| | `active_trading_days_30d` | Số ngày có giao dịch trong D−29..D |
+| `fs_margin_balance` | `margin_debt`, `margin_limit` | Giá trị chốt cuối ngày D |
+| | `margin_utilization_ratio` | Dư nợ / hạn mức; mẫu số 0 trả về 0.0 |
+| | `debt_change_7d` | Dư nợ D trừ dư nợ đúng ngày D−7 |
+| `fs_asset_balance` | `cash_balance`, `asset_value` | Tiền/tài sản chốt cuối ngày D |
+| | `collateral_value` | Làm tròn `asset_value × ratio`, ratio LOW=0.60, MEDIUM=0.70, HIGH=0.80 |
+| | `cash_to_asset_ratio` | Tiền / tài sản; mẫu số 0 trả về 0.0 |
+| | `NAV` | Tài sản + tiền − dư nợ |
+| `fs_portfolio` | `portfolio_value`, `holding_symbol_count`, `portfolio_concentration` | Quy mô và mức tập trung danh mục tại D |
+| | `unrealized_loss_ratio`, `risky_asset_ratio` | Tỷ lệ lỗ chưa thực hiện và tài sản rủi ro tại D |
+| `fs_campaign` | `campaign_count_30d`, `days_since_last_campaign` | Lịch sử tiếp xúc campaign đến D |
 
 Cửa sổ tính bằng **ngày lịch**, bao gồm ngày D; không phải 7 hoặc 30 dòng sau khi đã lọc dữ liệu. `collateral_value` được tính lại từ tài sản/risk profile, không lấy trực tiếp cột nguồn cùng tên.
 
@@ -145,7 +86,7 @@ Platform cũng xuất thêm hai use case dùng chung feature account/trading/mar
 
 Nhãn không được đưa vào feature view. Một feature view có thể được dùng bởi nhiều Feature Service/model.
 
-## 5. Split và quality gate của dữ liệu huấn luyện
+## 5. Split và quality gate
 
 | Vùng thời gian | Ngày snapshot |
 |---|---|
@@ -155,7 +96,7 @@ Nhãn không được đưa vào feature view. Một feature view có thể đư
 | Embargo | 2025-10-01..2025-10-30 |
 | Test | 2025-10-31..2025-12-31 |
 
-Mốc split nằm ở `training.splits` trong [features/settings.yaml](../features/settings.yaml). Không random split. Class weights tính riêng từng segment trên train: `N / (2 × N_class)`; validation/test không tham gia tính weights.
+Không random split. Class weights tính riêng từng segment trên train: `N / (2 × N_class)`; validation/test không tham gia tính weights.
 
 Quality gate yêu cầu khóa/null/foreign key hợp lệ, công thức balance và cửa sổ đúng, dataset không rỗng, cả hai lớp tồn tại trong từng split × segment. Các ngưỡng phân phối:
 
@@ -171,63 +112,43 @@ Các khoảng tỷ trọng tham khảo nu=35–55%, lu=20–40%, au=15–35% tro
 
 ## 6. Đầu ra và cách downstream đọc
 
-**Feature Store (hằng ngày).** Sáu bảng Iceberg `features.fs_*`, partition `report_date`, mỗi ngày ghi đè đúng một
-partition. Một ngày chỉ được đọc khi `control.fs_status(report_date)` là `COMPLETE` (vòng trạng thái WRITING →
-WRITTEN → QUALITY_PASSED | QUALITY_FAILED → COMPLETE; chạy lại một ngày đưa nó về WRITING ngay). `pipeline.predict`
-và `pipeline.drift` đọc qua `features.store`, ghi `feature_run_id` = `run_id` của lần tính ngày đó.
-
-**Dữ liệu huấn luyện (theo lần train).** `features.build_training` đọc lại các partition fs_* (mọi ngày phải
-`COMPLETE`), tính nhãn từ Gold và ghi `data/features/day4_runs/<run_id>/` trên PVC. Đọc `data/features/current.json`
-(hoặc `--run-dir` mà DAG truyền), rồi `quality_report.json` trong chính thư mục đó: `status == PASS`, `run_id` khớp,
-`feature_contract` đúng phiên bản.
+Đọc `data/features/current.json` một lần, lấy `path`, sau đó đọc `quality_report.json` trong chính thư mục đó. Kiểm tra `status == PASS`, `run_id` khớp pointer và `feature_contract` đúng phiên bản downstream hỗ trợ. Dùng đường dẫn trong `outputs`; không tự chọn thư mục mới nhất theo tên.
 
 | Artifact | Ý nghĩa |
 |---|---|
-| `training_dataset.parquet` | Feature account-day (sao chép từ fs_*), `loan_label_next`, `overdue_eligible`, `overdue_label_next_30d`, split |
-| `campaign_training_dataset.parquet` | Một dòng mỗi lần gửi `DELIVERED`: feature campaign-event và `campaign_response_label_14d` |
-| `loan_overdue_labels.parquet` | `master_account`, `report_date`, `event_timestamp`, nhãn loan/overdue, `overdue_eligible`, split (nguồn nhãn của `pipeline.evaluate`) |
-| `class_weights.json` | Counts/weights theo use case và segment, chỉ fit trên train |
-| `quality_report.json` | Kết quả kiểm tra, khoảng fs_* (`fs_range`), `label_end`, các `run_id` fs đã đọc, SHA-256 và số dòng |
-| `data/features/current.json` | Run được chọn cho downstream; chỉ đổi khi gate PASS |
+| Sáu `fs_*.parquet` | Khóa + feature của từng nhóm, không có label; mọi ngày đủ điều kiện đến `raw_end` (contract `day4-v4`) |
+| `training_dataset.parquet` | Feature account-day, `loan_label_next`, `overdue_label_next_30d` và split |
+| `loan_overdue_labels.parquet` | Entity table cho Feast: `master_account`, `report_date`, `event_timestamp` (cuối ngày D), nhãn loan/overdue, `overdue_eligible`, split. Không có feature |
+| `campaign_labels.parquet` | Entity table cho Feast: một dòng mỗi lần gửi, `event_timestamp` = `sent_at` thật, cột offer/kênh/lịch sử campaign (tính riêng cho lần gửi), nhãn, split |
+| `feast_check.json` | Kết quả `scripts/day5_feast_check.py` (parity, null, TTL, thời gian) |
+| `campaign_training_dataset.parquet` | Feature campaign-event và `campaign_response_label_14d` |
+| `usecase_registry.json` | Mapping use case → label, dataset và feature groups |
+| `class_weights.json` | Counts/weights theo segment, chỉ fit trên train |
+| `quality_report.json` | Check results, snapshot nguồn/đích, SHA-256 của Parquet và số dòng |
+| `data/features/current.json` | Phiên bản được chọn cho downstream |
+| `data/source_current.json` | Nguồn mặc định cho lần chạy tiếp theo |
 
-Gate FAIL chỉ ghi `data/features/rejected_training_report.json`. Các file của script day4 cũ (`fs_*.parquet`,
-`usecase_registry.json`, `campaign_labels.parquet`, `feast_check.json`) chỉ còn trong các run cũ.
+Mỗi file JSON được thay thế nguyên tử. Hai pointer chưa phải một transaction; khi có lỗi giữa hai lần ghi, report trong feature run là nguồn thông tin lineage để đối chiếu. Không chạy đồng thời nhiều tiến trình publisher trong MVP này.
 
-## 7. Cổng chất lượng theo ngày (`features.quality`)
+## 7. Ranh giới trước khi dùng online
 
-Chỉ đọc partition của ngày T. Không đạt thì ngày T là `QUALITY_FAILED` trong `control.fs_status` và không được
-đánh dấu `COMPLETE`.
-
-| Kiểm tra | Điều kiện đạt |
-|---|---|
-| Hợp đồng | Tên cột và kiểu Iceberg của mỗi bảng đúng như trên, không thiếu, không thừa |
-| Khoá | Không null, không trùng; sáu bảng cùng tập khoá |
-| Số dòng | > 0; số dòng ngày T / ngày trước trong `quality.row_count_ratio` ([features/settings.yaml](../features/settings.yaml)) |
-| Null | Tỷ lệ null của các cột hợp đồng ≤ `quality.max_null_rate` (0) |
-| Miền giá trị | segment ∈ {nu, lu, au}; tuổi ≥ 30; cửa sổ 7 ngày ≤ 30 ngày; số ngày trong 0..30; các tỷ lệ trong miền; `NAV` và các tỷ lệ đúng công thức |
-
-## 8. Tách feature và nhãn
-
-Từ contract `day4-v4`, feature và nhãn được tách; từ fs-v6 chúng được tính ở hai bước khác nhau:
+Từ contract `day4-v4`, feature và nhãn được tách thành hai bảng:
 
 ```
-hằng ngày:   Gold T−30..T + fs_state(T−1) ──► features.compute ──► partition T của 6 bảng fs_*   (KHÔNG nhãn, KHÔNG split)
-mỗi lần train: fs_* [start, end] + nhãn từ Gold (chỉ ngày đủ cửa sổ) ──► candidate (bỏ embargo) ──► training_dataset
+windowed ──► scoring_features  (mọi ngày đủ điều kiện đến raw_end, KHÔNG nhãn, KHÔNG split) ──► 6 bảng fs_*
+                   │
+                   └─ JOIN nhãn, chỉ ngày đủ cửa sổ 30 ngày ──► snapshots ──► candidate (bỏ embargo) ──► training_dataset
 ```
 
-- `fs_*` gồm cả ngày embargo và 30 ngày cuối chưa có nhãn, nên batch scoring luôn có ngày mới nhất.
-- `training_dataset` đọc lại feature từ fs_*, không tính lại, nên cùng khóa thì huấn luyện và chấm điểm thấy cùng giá trị. `overdue_eligible` dùng một biểu thức SQL (`OVERDUE_ELIGIBLE_SQL`) cho cả hai phía; dòng campaign dùng chung `features/sql/campaign.sql`.
+- `fs_*` gồm cả ngày embargo và 30 ngày cuối chưa có nhãn, nên batch scoring luôn có ngày mới nhất (`raw_end`).
+- `training_dataset` lấy feature **sao chép** từ `scoring_features`, không tính lại; quality gate `scoring.training_parity` kiểm tra mọi feature trùng nhau ở cùng khóa, `scoring.covers_every_candidate_key` kiểm tra không thiếu khóa.
 - Điều kiện vòng đời vẫn áp dụng cho scoring: tài khoản mở ít nhất 30 ngày, trước ngày đóng hoặc dormant.
 - `campaign_training_dataset` có grain campaign-event riêng và vẫn ghép với `candidate`.
 - Online (Redis, Feast online) thuộc giai đoạn 2; khi làm, nạp từ `fs_*` này.
 
 Kiểm thử point-in-time hiện kiểm chứng theo **event time**. Chưa có `ingested_at`/`available_at` để chứng minh một event đến muộn đã thực sự sẵn sàng tại thời điểm dự báo lịch sử.
 
-## 9. Feast offline (thử nghiệm cũ, contract `day4-v5`, ngoài phạm vi)
-
-Feast nằm ngoài phạm vi tài liệu luồng (mục 1.6). Phần dưới mô tả thử nghiệm trên các run của script day4 cũ và
-không áp dụng cho Feature Store theo ngày.
-
+## 8. Feast offline (contract `day4-v5`)
 
 ```
 fs_* (+ event_timestamp) ──► feature_repo/definitions.py ──► feast apply ──► registry

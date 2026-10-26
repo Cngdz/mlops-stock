@@ -1,18 +1,15 @@
-# quay.io/minio and Docker Hub minio/* no longer serve public images (401/denied), so the image is mirrored once
-# into the cluster's Harbor (infra/README.md, "Images"):
-#   docker tag minio/minio:RELEASE.2024-12-18T13-15-44Z harbor.local/mirror/minio:RELEASE.2024-12-18T13-15-44Z
-#   docker push harbor.local/mirror/minio:RELEASE.2024-12-18T13-15-44Z
+# quay.io/minio and Docker Hub minio/* no longer serve public images (401/denied).
+# Use the copy already in the local Docker cache, loaded into kind first:
+#   kind load docker-image minio/minio:RELEASE.2024-12-18T13-15-44Z --name <cluster>
 # The server image also ships `mc`, so the bucket job reuses it.
 image:
-  repository: harbor.local/mirror/minio    # <- your Harbor host
+  repository: minio/minio
   tag: RELEASE.2024-12-18T13-15-44Z
-  pullPolicy: IfNotPresent
+  pullPolicy: Never
 mcImage:
-  repository: harbor.local/mirror/minio
+  repository: minio/minio
   tag: RELEASE.2024-12-18T13-15-44Z
-  pullPolicy: IfNotPresent
-imagePullSecrets:
-  - name: harbor-pull
+  pullPolicy: Never
 
 rootUser: minioadmin
 rootPassword: minioadmin

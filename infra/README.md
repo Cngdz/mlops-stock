@@ -1,109 +1,25 @@
 # Infra runbook
 
-Everything runs on one Kubernetes cluster (docs chapter 2), split by namespace: `airflow` (scheduling), `pipeline`
-(batch pods), `mlops` (Postgres, MinIO, MLflow, Redis, deployer), `argocd`, `serving` (KServe). Images come from the
-cluster's Harbor registry. The workstation only builds/pushes images and opens port-forwards to look at UIs.
-
-`harbor.local` below and in the manifests is a placeholder for your Harbor host: replace it in
-`airflow-values.yaml`, `minio-values.yaml`, `deployer/k8s/deployer.yaml`, `pipeline/k8s/*.yaml` and the two
-Dockerfiles (`grep -rn harbor.local infra pipeline deployer`).
-
-## Images (Harbor)
-
-```powershell
-docker login harbor.local
-docker build -f pipeline/Dockerfile --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t harbor.local/mlops/mlops-pipeline:v1 .
-docker push harbor.local/mlops/mlops-pipeline:v1
-docker build -f deployer/Dockerfile -t harbor.local/mlops/mlops-deployer:v1 .      # FROM the pipeline image
-docker push harbor.local/mlops/mlops-deployer:v1
-# MinIO no longer publishes images: mirror the cached copy once
-docker tag minio/minio:RELEASE.2024-12-18T13-15-44Z harbor.local/mirror/minio:RELEASE.2024-12-18T13-15-44Z
-docker push harbor.local/mirror/minio:RELEASE.2024-12-18T13-15-44Z
-# pull secret (robot account) in every namespace that pulls from Harbor
-foreach ($ns in "mlops", "pipeline") { kubectl create namespace $ns --dry-run=client -o yaml | kubectl apply -f -
-  kubectl -n $ns create secret docker-registry harbor-pull --docker-server=harbor.local --docker-username=<robot> --docker-password=<token> }
-```
-
-Tasks pull with `imagePullPolicy: Always`: pushing a new `:v1` is enough, the next pod runs it.
+Namespace `mlops` on a kind cluster: Postgres (MLflow backend), Redis (Feast online, phase 2),
+MinIO (artifact store, bucket `mlflow`), MLflow 3.15.2.
 
 ## Bring up
 
 ```powershell
-kubectl config use-context <cluster>
-# one-time secrets that are not in Git
-kubectl -n mlops create secret generic deployer-github --from-literal=token=<fine-grained token, Contents: read and write>
-kubectl create namespace airflow
-kubectl -n airflow create secret generic airflow-git-credentials `
-  --from-literal=GIT_SYNC_USERNAME=Cngdz --from-literal=GIT_SYNC_PASSWORD=<read-only token> `
-  --from-literal=GITSYNC_USERNAME=Cngdz --from-literal=GITSYNC_PASSWORD=<read-only token>
-.\infra\bootstrap.ps1          # namespaces, secrets/RBAC outside Helm, helmfile sync (waits for Ready), deployer
-.\infra\port-forward.ps1       # workstation access only: MLflow 5050, MinIO 9000/9001, Postgres 5432, Airflow 8080
+kind create cluster --name mlops-cluster     # or reuse an existing kind cluster (kubectl config use-context kind-<name>)
+.\infra\bootstrap.ps1                        # loads the MinIO image into kind, helmfile sync, waits for Ready
+.\infra\port-forward.ps1                     # MLflow -> 127.0.0.1:5050, MinIO -> 127.0.0.1:9000 (keep the window open)
 uv run python scripts/day1_verify.py         # end-to-end: log a model to MLflow + MinIO
 ```
-
-Postgres databases: a fresh install creates `iceberg_catalog` and `airflow` (initdb script in
-`postgres-values.yaml`). On an existing volume initdb does not run again; create the missing one by hand first:
-`kubectl -n mlops exec postgres-postgresql-0 -- env PGPASSWORD=mlflowpassword psql -U postgres -c "CREATE DATABASE airflow"`.
 
 ## Check
 
 ```powershell
-kubectl config current-context; kubectl get nodes   # which cluster kubectl talks to
-helm list -A                                        # postgres, redis, minio, mlflow, argocd, metrics-server, airflow
-kubectl get pods -A                                 # all Running
-kubectl describe pod <pod> -n <ns>                  # Events at the bottom when a pod is stuck
+kind get clusters ; kubectl config current-context   # which cluster kubectl talks to
+helm list -n mlops                                   # postgres, redis, minio, mlflow = deployed
+kubectl get pods,svc -n mlops                        # all Running 1/1
+kubectl describe pod <pod> -n mlops                  # Events at the bottom when a pod is stuck
 ```
-
-## Airflow in the cluster
-
-Release `airflow` (chart `apache-airflow/airflow` 1.16.0 = Airflow 2.10.5, `infra/helm-values/airflow-values.yaml`):
-LocalExecutor, metadata in the `airflow` database of the mlops Postgres, DAGs pulled from `master/airflow/dags` by
-git-sync every 60 s (push to master = new DAG code; nothing is copied into a pod). Tasks are
-`KubernetesPodOperator` pods in namespace `pipeline`, created with the scheduler's in-cluster service account
-(`pipeline/k8s/40-airflow-rbac.yaml`). The `<usecase>_predict` DAGs wait for the feature store with a `SqlSensor` on
-connection `feature_store_db` (Secret `airflow-connections`, `infra/bootstrap/airflow-connections-secret.yaml`).
-
-```powershell
-kubectl -n airflow get pods
-kubectl -n airflow exec deploy/airflow-scheduler -- airflow dags list
-kubectl -n airflow exec deploy/airflow-scheduler -- airflow dags trigger feature_store_daily --conf '{\"report_date\":\"2026-01-30\"}'
-kubectl -n airflow port-forward svc/airflow-webserver 8080:8080    # UI admin / admin (change it)
-```
-
-The docs write `deploy/airflow`: the chart names the deployments `airflow-scheduler` and `airflow-webserver`.
-
-## Feature store: Gold -> fs_* (docs chapter 3)
-
-Gold and fs_* live in the same Postgres catalog `iceberg_catalog` as the monitoring tables, data in
-`s3://warehouse/`: namespaces `gold` (8 source tables, read-only), `features` (`fs_*` partitioned by `report_date`,
-plus the internal carried state `fs_state`). Readiness is `control.fs_status` (plain Postgres table, schema
-`control`, same database). Contract: `docs/feature_contract.md`.
-
-One-time, from the workstation (port-forwards open):
-
-```powershell
-uv run python scripts/migrate_gold.py                                          # local SQLite Gold -> gold.* (about 30 s)
-uv run python -m features.backfill --start 2025-02-01 --end 2026-01-30 --bootstrap   # 12 months, month by month
-uv run python -m features.status --start 2026-01-25 --end 2026-01-30          # all COMPLETE
-```
-
-Daily (DAG `feature_store_daily`, 23:00 UTC = 06:00 VN, `report_date` = yesterday or the conf value):
-`check_source -> compute_features -> write_partitions -> quality_gate -> publish_marker`. Each day reads Gold of
-T-30..T plus `fs_state` of T-1, overwrites partition T of the six tables, checks only partition T, then marks T
-`COMPLETE`. A re-run withdraws the marker first (WRITING) and replaces only partition T. A missing T-1 state stops
-the run (`--bootstrap` starts a new history). Weekly `feature_store_maintenance`: partitions older than 12 months
-(counted from the latest COMPLETE day), snapshots older than 7 days, orphan files older than 3 days, training runs
-beyond the newest 12.
-
-Training data (`features.build_training`, first task of every `<usecase>_train`): fs_* partitions of the split range
-+ labels from Gold -> `data/features/day4_runs/<usecase>_<ts>/` on the PVC (same files training.train and
-pipeline.evaluate always read), `current.json` moved to it on PASS.
-
-Measured on the workstation against a local SQLite + file lakehouse (23/10/2026): Gold copy 30 s; backfill of 364
-days 1 min 40 s; one daily run (compute 4 s + write + gate + publish) a few seconds, 4731 rows for 2026-01-30;
-`build_training` 16 s. Content check against the last full-rebuild run (20261007T095923177784): fs_* identical on
-1,722,576 rows except `days_since_last_campaign` / `has_campaign_history` (bug fixed, see the contract), and
-training_dataset (1,284,182 rows), campaign_training_dataset (28,018) and class weights identical.
 
 ## Serving via GitOps (ArgoCD, Day 9)
 
@@ -139,22 +55,14 @@ rolls the pod once. Rollout is zero-downtime: the old pod stays until the new on
 `deployer/models.yaml`). It never touches the cluster: it commits the file to `master` through the GitHub API and
 ArgoCD does the rest. That file is generated, do not edit it by hand.
 
-It runs as Deployment `mlops/deployer` (`deployer/k8s/deployer.yaml`, image `mlops-deployer` = pipeline image +
-deployer + kubectl): `--loop --interval 60 --verify-every 600`, `GITHUB_TOKEN` from Secret `deployer-github`,
-MLflow/MinIO through `mlflow.mlops.svc` / `minio.mlops.svc` (MinIO keys from the chart's Secret `minio`), and a
-service account that may only read InferenceServices in `serving`.
-
 ```powershell
-kubectl apply -f deployer\k8s\deployer.yaml                      # also done by bootstrap.ps1
-kubectl -n mlops logs -f deploy/deployer                         # decisions: skip | unchanged | blocked | create | update
-kubectl -n mlops rollout restart deploy/deployer                 # after pushing a new mlops-deployer:v1
-# from the workstation, for a dry run only (never a second --loop next to the Deployment)
-uv run --env-file .env python -m deployer --dry-run              # .env: GITHUB_TOKEN=..., port-forwards open
+# .env (git-ignored): GITHUB_TOKEN=<fine-grained token, only this repo, Contents: read and write>
+.\infra\port-forward.ps1                                         # MLflow on 127.0.0.1:5050
+uv run --env-file .env python -m deployer --dry-run              # print the diff, commit nothing
+uv run --env-file .env python -m deployer                        # one round
+uv run --env-file .env python -m deployer --loop --interval 60   # poll every 60 s
 uv run python -m pytest tests/test_deployer.py                   # not `uv run pytest`: the global pytest is broken
 ```
-
-`deployer/models.yaml` lists all six models; an entry without `@production` is skipped, so the RAM cost (about 1 GB
-per InferenceService) only appears once a model is promoted. Comment entries out if the cluster cannot hold six.
 
 Day 11 additions: the decision lives in the pure `deployer/plan.py` (`skip | unchanged | blocked | create |
 update`). Before committing a changed manifest the deployer checks that `<storageUri>/MLmodel` exists in MinIO
@@ -179,32 +87,43 @@ ArgoCD sync finished +23 s -> new pod Ready +17 s (40 s after the commit). The a
 recorded, so alias -> commit (at most the 60 s poll) is unmeasured. These 40 s are a lucky poll: ArgoCD's
 reconcile is 60 s + up to 60 s jitter, see the Day 9 section.
 
-## Pipeline in the cluster (Day 12, updated)
+## Pipeline in the cluster + Airflow (Day 12)
 
-Batch work runs as pods from the `mlops-pipeline` image in namespace `pipeline`, started by Airflow (see "Airflow in
-the cluster"). Until 23/10/2026 Airflow ran standalone in Docker with a kind kubeconfig (`airflow/start.ps1`, removed)
-and images were side-loaded with `kind load`; both are gone. The feature runs no longer have to be copied into the
-PVC either: `features.build_training` writes them there from the cluster. `20-data-loader.yaml` stays for inspecting
-the PVC, `30-smoke-train.yaml` for a train without MLflow:
+Batch work (train, promote report, later batch predict) runs as pods from the `mlops-pipeline` image in namespace
+`pipeline`; Airflow (standalone, in Docker, on the `kind` network) only schedules and orders them
+(`KubernetesPodOperator`, `airflow/dags/mlops.py`). The feature pipeline (Days 2-4) still runs on the host: the
+Iceberg metadata stores absolute `C:\...` paths, so the nodes cannot read it. The platform starts from an approved
+feature run.
 
 ```powershell
-kubectl apply -f pipeline\k8s\30-smoke-train.yaml; kubectl -n pipeline logs -f job/smoke-train; kubectl delete -f pipeline\k8s\30-smoke-train.yaml
+docker build -f pipeline/Dockerfile --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) -t mlops-pipeline:v1 .
+kind load docker-image mlops-pipeline:v1 --name lab           # kind has its own image store; pods use imagePullPolicy: Never
+kubectl apply -f pipeline\k8s\00-namespace.yaml -f pipeline\k8s\10-pvc.yaml
+kubectl apply -f pipeline\k8s\20-data-loader.yaml             # temporary pod that mounts the PVC
+# copy the approved run (Git Bash needs MSYS_NO_PATHCONV=1, see pitfalls; `kubectl cp` failed on Windows, tar over exec works)
+tar cf - -C data/features/day4_runs <RUN_ID> | kubectl -n pipeline exec -i data-loader -- tar xf - -C /app/data/features/day4_runs
+tar cf - -C data/features current.json       | kubectl -n pipeline exec -i data-loader -- tar xf - -C /app/data/features
+kubectl delete -f pipeline\k8s\20-data-loader.yaml
+kubectl apply -f pipeline\k8s\30-smoke-train.yaml             # optional: train without MLflow, proves image + data + memory
+.\airflow\start.ps1                                           # http://localhost:8080, admin / docker exec airflow cat /opt/airflow/standalone_admin_password.txt
+docker stop airflow                                           # free the RAM when not in use; docker start airflow brings it back
 ```
 
-Each `<usecase>_train` DAG is build_training -> train -> `training.promote` WITHOUT `--approve` (prints the gate;
-exit 1 = REFUSED, no retry). Nothing in Airflow may set `@production`: that stays a human step.
+`airflow/kubeconfig` holds cluster-admin credentials: git-ignored, never commit it. DAG `loan_propensity_train` is
+train -> `training.promote` WITHOUT `--approve` (prints the gate; exit 1 = REFUSED, no retry). Nothing in Airflow may
+set `@production`: that stays a human step.
 
-Measured with the old standalone setup (21-22/10/2026): image 2.15 GB; smoke train about 1.3 GB RAM peak (limit 2 GB), 6 models in about 25 s;
+Measured (21-22/10/2026): image 2.15 GB; smoke train about 1.3 GB RAM peak (limit 2 GB), 6 models in about 25 s;
 Airflow container about 1.56 GiB while starting, about 0.57 GiB idle; DAG run train -> gate 1 min 38 s (train pod 71 s
 including start, gate pod 9 s). The registered run carries `git_commit` of the image (28d9e2a) instead of `unknown`.
 
 ## Monitoring tables: Iceberg on MinIO (Day 13)
 
-One Iceberg catalog for everything in the cluster: a PyIceberg `SqlCatalog` stored in the Postgres database
-`iceberg_catalog` (the Postgres that already backs MLflow) with data in `s3://warehouse/` (MinIO), namespaces
-`gold`, `features`, `monitoring`. Pods and the host read the same tables, and table locations are `s3://` URIs
-instead of `C:\...`. The local SQLite catalog (`data/catalog_full`) is only the source of `scripts/migrate_gold.py`.
-A production setup would use one REST catalog (Lakekeeper, Polaris, Nessie).
+Two Iceberg catalogs by role. The Day 3-4 source/feature tables stay in the local SQLite catalog
+(`data/catalog_full`, warehouse on the host disk). The in-cluster tables use a PyIceberg `SqlCatalog` stored in the
+Postgres database `iceberg_catalog` (the Postgres that already backs MLflow) with data in `s3://warehouse/` (MinIO):
+pods and the host read the same tables, and table locations are `s3://` URIs instead of `C:\...`. A production setup
+would use one REST catalog (Lakekeeper, Polaris, Nessie) for everything.
 
 One-time setup (bucket `warehouse` is also in `minio-values.yaml` for a fresh install):
 
@@ -216,18 +135,15 @@ kubectl -n mlops exec deploy/minio -- sh -c "mc alias set local http://localhost
 
 | Table (namespace `monitoring`) | Written by | Partition | Re-run |
 |---|---|---|---|
-| `pred_<usecase>` | `pipeline.predict --usecase U --date D [--end E]` | `score_date` | replaces that day |
-| `drift_<usecase>` | `pipeline.drift --usecase U --date D [--reference R]` | `current_date` | replaces (D, R) |
-| `eval_<usecase>` | `pipeline.evaluate --usecase U --start S --end E` | `window_end` | replaces (S, E) |
+| `pred_loan_propensity` | `pipeline.predict --date D [--end E]` | `score_date` | replaces that day |
+| `drift_loan_propensity` | `pipeline.drift --date D [--reference R]` | `current_date` | replaces (D, R) |
+| `eval_loan_propensity` | `pipeline.evaluate --start S --end E` | `window_end` | replaces (S, E) |
 
-`<usecase>` = `loan_propensity` (all accounts, segments nu/lu/au), `overdue_risk` (only `overdue_eligible = 1`,
-segments lu/au), `campaign_response` (the DELIVERED sends of the day, one model `_all`, `pred_` rows carry
-`campaign_event_id`). Thresholds live in `pipeline/monitoring.yaml`, one entry per use case (still [TODO] for mentor
-confirmation in the design doc). Drift HTML reports: `s3://warehouse/reports/drift/<usecase>/<day>_vs_<reference>.html`
-(MinIO console, port 9001). DAGs per use case: `<usecase>_predict` = wait_features (control.fs_status COMPLETE) ->
-predict -> drift -> retrain_check (exit 99 = skip) -> trigger `<usecase>_train`; `<usecase>_evaluate` weekly. Dates are
-DAG params because the synthetic data has no "today" (features end 2026-01-30, labels end 2025-12-31, the last
-campaign is sent 2026-01-16: `campaign_response_predict` defaults to that day).
+Thresholds live in `pipeline/monitoring.yaml` (still [TODO] for mentor confirmation in the design doc). Drift HTML
+reports: `s3://warehouse/reports/drift/<usecase>/<day>_vs_<reference>.html` (MinIO console, port 9001).
+DAGs: `loan_propensity_predict` = predict -> drift -> retrain_check (exit 99 = skip) -> trigger
+`loan_propensity_train`; `loan_propensity_evaluate` weekly. Dates are DAG params because the synthetic data has no
+"today" (features end 2026-01-30, labels end 2025-12-31).
 
 Measured on the host (22/10/2026): predict 2026-01-30 = 4731 rows (au v4 2937, lu v4 851, nu v2 943), re-run still
 4731. Drift 2026-01-30 vs 2025-06-30 = 18/24 features (75%) -> critical; vs 2026-01-29 = 1/24 (account_age_days,
@@ -250,9 +166,7 @@ package (about 10 min, needs network) and `kind load` of 2.6 GB takes several mi
 
 | Symptom | Cause | Fix in repo |
 |---|---|---|
-| MinIO `ImagePullBackOff`, `401 UNAUTHORIZED` | MinIO no longer serves public images (quay.io 401, Docker Hub denied) | the cached `minio/minio:RELEASE.2024-12-18T13-15-44Z` is mirrored into Harbor once (section "Images") and `minio-values.yaml` pulls it from there. Keep the local copy (`docker save`) until the mirror exists |
-| A feature day fails with `no features.fs_state partition for <T-1>` | the daily job continues the state of the day before; a day was skipped or the store is new | run the missing day first (`features.backfill --start <gap> --end <T>`), or `--bootstrap` to start a new history |
-| `<usecase>_predict` stuck in `wait_features` | `control.fs_status` has no COMPLETE row for `score_date` | look at `features.status --date <day>`: WRITTEN/QUALITY_FAILED means the feature DAG stopped there |
+| MinIO `ImagePullBackOff`, `401 UNAUTHORIZED` | MinIO no longer serves public images (quay.io 401, Docker Hub denied) | `minio-values.yaml` uses `minio/minio:RELEASE.2024-12-18T13-15-44Z` with `pullPolicy: Never`; `bootstrap.ps1` runs `kind load docker-image`. The image exists only in the local Docker cache: keep it (`docker save` it for another machine) |
 | MLflow `2.1.1` in the pod, aliases fail | chart `~0.7.0` shipped MLflow 2.1.1 | chart pinned to `1.11.6` (MLflow 3.15.2 = client version) |
 | `port-forward svc/mlflow 5050:5000` fails | chart 1.x service port is 80 | `5050:80` |
 | MLflow artifact upload fails, no bucket | bucket was never created by the chart | `buckets: [mlflow]` in `minio-values.yaml` |

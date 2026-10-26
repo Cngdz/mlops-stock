@@ -10,13 +10,6 @@ auth:
 
 # Cấu hình tài nguyên lưu trữ (PVC) và probes
 primary:
-  # Fresh volume only (initdb does not run again on an existing PVC; infra/README.md has the manual CREATE DATABASE):
-  # iceberg_catalog = Iceberg catalog of gold/features/monitoring + control.fs_status, airflow = Airflow metadata.
-  initdb:
-    scripts:
-      00-databases.sql: |
-        CREATE DATABASE iceberg_catalog;
-        CREATE DATABASE airflow;
   persistence:
     size: "2Gi"
   livenessProbe:

@@ -1,5 +1,4 @@
-# Temporary pod to inspect the PVC or copy files in/out (kubectl cp / tar over exec need a running container).
-# Feature runs no longer need copying: features.build_training writes them on the PVC from the cluster.
+# Temporary pod to copy a feature run into the PVC (kubectl cp needs a running container).
 # Not part of any GitOps path: apply it by hand, copy, delete it. The data stays on the PVC.
 apiVersion: v1
 kind: Pod
@@ -7,12 +6,10 @@ metadata:
   name: data-loader
   namespace: pipeline
 spec:
-  imagePullSecrets:
-    - name: harbor-pull
   containers:
     - name: loader
-      image: harbor.local/mlops/mlops-pipeline:v1    # <- your Harbor host
-      imagePullPolicy: Always
+      image: mlops-pipeline:v1
+      imagePullPolicy: Never
       command: ["sleep", "infinity"]
       volumeMounts:
         - name: data
