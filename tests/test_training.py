@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from training.config import load_usecases, validate
-from training.data import check_run, check_splits
+from training.data import balanced_weights, check_run, check_splits, label_end, resplit, split_windows
 from training.train import run
 
 SPLIT_DAYS = {"train": "2025-02-01", "validation": "2025-04-01", "test": "2025-06-01"}
@@ -91,6 +91,35 @@ class DataTests(unittest.TestCase):
         (tmp / "class_weights.json").write_text(json.dumps({"approved_for_training": True}))
         with self.assertRaises(RuntimeError):
             check_run(tmp)
+
+
+class SlidingSplitTests(unittest.TestCase):
+    def test_windows_at_default_as_of_match_day4_split(self):
+        uc = load_usecases()["loan_propensity"]
+        end = label_end(pd.Series(["2025-12-31"]), pd.Timestamp("2026-01-30"), uc.label_horizon_days)
+        w = split_windows(end, **uc.windows)
+        ts = pd.Timestamp
+        self.assertEqual(w["test"], (ts("2025-10-31"), ts("2025-12-31")))
+        self.assertEqual(w["validation"], (ts("2025-07-31"), ts("2025-09-30")))
+        self.assertEqual(w["train"], (None, ts("2025-06-30")))
+
+    def test_windows_slide_with_as_of_and_drop_unlabeled_and_embargo_rows(self):
+        uc = replace(load_usecases()["loan_propensity"], windows={"test_days": 10, "validation_days": 10,
+                                                                  "embargo_days": 5})
+        days = pd.date_range("2025-01-01", "2025-03-31").strftime("%Y-%m-%d")
+        df = pd.DataFrame({"report_date": days, "split": "train"})
+        out = resplit(df, uc, "2025-03-01")  # labels known up to 2025-01-30
+        dates = pd.to_datetime(out["report_date"])
+        self.assertEqual(dates.max(), pd.Timestamp("2025-01-30"))
+        self.assertEqual(out.groupby("split")["report_date"].agg(["min", "max"]).loc["test"].tolist(),
+                         ["2025-01-21", "2025-01-30"])
+        self.assertEqual(len(out), 30 - 2 * 5)  # 30 labeled days minus two 5-day embargoes
+        later = resplit(df, uc, "2025-03-31")  # a month later: every window moves a month forward
+        self.assertEqual(later.loc[later["split"] == "test", "report_date"].max(), "2025-03-01")
+        self.assertEqual(later.loc[later["split"] == "train", "report_date"].max(), "2025-01-30")
+
+    def test_balanced_weights(self):
+        self.assertEqual(balanced_weights(np.array([0, 0, 0, 1])), {0: 4 / 6, 1: 2.0})
 
 
 class EndToEndTests(unittest.TestCase):

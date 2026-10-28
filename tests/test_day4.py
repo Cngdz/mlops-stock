@@ -156,7 +156,8 @@ class Day4Tests(unittest.TestCase):
             WHERE master_account='A' AND report_date='2025-02-01'""").fetchone()
         self.assertEqual(actual,(2,4,40,4,'au',1,5,115,60,0.0))
         self.assertEqual(c.execute("SELECT master_account,margin_segment,loan_label_next FROM candidate WHERE report_date='2025-02-01' ORDER BY 1").fetchall(),[('A','au',1),('B','au',0),('C','nu',0),('D','lu',0)])
-        self.assertEqual(c.execute("SELECT count(*) FROM candidate WHERE split IS NULL OR report_date BETWEEN '2025-07-01' AND '2025-07-30'").fetchone()[0],0)
+        # embargo rows stay (tagged) so training.train --as-of can re-split by date
+        self.assertEqual(c.execute("SELECT count(*) FROM candidate WHERE split IS NULL OR (report_date BETWEEN '2025-07-01' AND '2025-07-30' AND split<>'embargo')").fetchone()[0],0)
         c.close()
 
     def test_future_changes_do_not_change_features(self):
@@ -258,10 +259,12 @@ class Day4Tests(unittest.TestCase):
         cols = {r[0] for r in c.execute("DESCRIBE scoring_features").fetchall()}
         self.assertFalse({"loan_label_next", "overdue_label_next_30d", "overdue_eligible", "split"} & cols)
         self.assertEqual(c.execute("SELECT max(report_date) FROM scoring_features").fetchone()[0], date(2026, 1, 30))
-        # Embargo day and a day inside the last 30 days: scoring rows exist, training rows do not.
-        for day in ["2025-07-15", "2026-01-20"]:
+        # Embargo day: scoring rows and training rows tagged 'embargo'. Inside the last 30 days: no label, no training row.
+        for day, training_rows in [("2025-07-15", 4), ("2026-01-20", 0)]:
             self.assertEqual(c.execute("SELECT count(*) FROM scoring_features WHERE report_date=?", [day]).fetchone()[0], 4)
-            self.assertEqual(c.execute("SELECT count(*) FROM candidate WHERE report_date=?", [day]).fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT count(*) FROM candidate WHERE report_date=?", [day]).fetchone()[0], training_rows)
+        self.assertEqual({r[0] for r in c.execute("SELECT split FROM candidate WHERE report_date='2025-07-15'").fetchall()},
+                         {"embargo"})
         c.close()
 
     def test_training_features_equal_scoring_features_for_the_same_key(self):

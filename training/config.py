@@ -23,8 +23,8 @@ class UseCase:
     label: str
     numeric_features: list[str]
     categorical_features: list[str]
-    class_weights: str
     threshold: dict
+    label_horizon_days: int = 30
     segment_column: str | None = None
     segments: list[str] | None = None
     row_filter: str | None = None
@@ -32,6 +32,7 @@ class UseCase:
     n_jobs: int = 4
     lgbm: dict = field(default_factory=dict)
     lr: dict = field(default_factory=dict)
+    windows: dict = field(default_factory=dict)
 
     @property
     def features(self) -> list[str]:

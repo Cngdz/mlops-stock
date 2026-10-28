@@ -3,6 +3,7 @@
 Usage:  python -m training.train                                 # all use cases, run in current.json
         python -m training.train --usecase loan_propensity --run-dir data/features/day4_runs/<id>
         python -m training.train --usecase loan_propensity --train-cutoff-days 80   # backtest
+        python -m training.train --usecase loan_propensity --as-of 2026-01-30       # sliding split (Airflow)
         python -m training.train --no-mlflow                     # Day 6 mode, no MLflow server needed
 
 Writes data/models/day6_runs/<train_run_id>/<usecase>/<segment>/{lr,lgbm}.joblib + metrics.json,
@@ -25,6 +26,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 import joblib
+import pandas as pd
 from sklearn.pipeline import Pipeline
 
 from training.config import UseCase, load_usecases
@@ -92,7 +94,7 @@ def write_segment(out: Path, uc: UseCase, result: SegmentResult, lineage: dict) 
 
 def run(usecases: list[str] | None = None, run_dir: str | Path | None = None,
         out_root: Path = OUT_ROOT, config: Path | None = None,
-        track: bool = False, train_cutoff_days: int = 0) -> Path:
+        track: bool = False, train_cutoff_days: int = 0, as_of: str | None = None) -> Path:
     """track=True (Day 7): log to MLflow, register @staging versions and record the promotion gate."""
     all_usecases = load_usecases(config) if config else load_usecases()
     names = usecases or list(all_usecases)
@@ -103,7 +105,7 @@ def run(usecases: list[str] | None = None, run_dir: str | Path | None = None,
     lineage = {
         "train_run_id": train_run_id, "feature_run_id": approved["run_id"],
         "feature_contract": approved["feature_contract"], "git_commit": git_commit(),
-        "train_cutoff_days": train_cutoff_days, "python": platform.python_version(),
+        "train_cutoff_days": train_cutoff_days, "as_of": as_of or "", "python": platform.python_version(),
         "libraries": {p: version(p) for p in ("scikit-learn", "lightgbm", "pandas", "numpy")},
     }
     if track:
@@ -113,12 +115,16 @@ def run(usecases: list[str] | None = None, run_dir: str | Path | None = None,
     summary = {**lineage, "usecases": {}}
     for name in names:
         uc = all_usecases[name]
-        df = cut_train(load_frame(run_dir, uc), train_cutoff_days)
-        summary["usecases"][name] = {"seed": uc.seed, "feature_hash": uc.feature_hash(), "segments": {}}
+        df = cut_train(load_frame(run_dir, uc, as_of), train_cutoff_days)
+        # data_end = last labeled day of the test split: drift uses it as reference, retrain_check as "seen up to"
+        uc_lineage = {**lineage, "data_end": str(pd.to_datetime(df.loc[df["split"] == "test", "report_date"]).max().date())}
+        print(f"{name}: as_of {as_of or '(Day 4 split)'}, data_end {uc_lineage['data_end']}", flush=True)
+        summary["usecases"][name] = {"seed": uc.seed, "feature_hash": uc.feature_hash(),
+                                     "data_end": uc_lineage["data_end"], "segments": {}}
         challengers, champions, versions, notes = {}, {}, {}, {}
-        for data in iter_segments(df, uc, approved["class_weights"]):
+        for data in iter_segments(df, uc):
             result = train_segment(uc, data)
-            write_segment(out_dir / name / data.segment, uc, result, lineage)
+            write_segment(out_dir / name / data.segment, uc, result, uc_lineage)
             summary["usecases"][name]["segments"][data.segment] = {
                 "selected": result.selected,
                 **{m: {"val_auc": r["validation"]["roc_auc"], "test_auc": r["test"]["roc_auc"],
@@ -129,7 +135,7 @@ def run(usecases: list[str] | None = None, run_dir: str | Path | None = None,
             if track:
                 (challengers[data.segment], champions[data.segment],
                  notes[data.segment]) = registry.compare_with_champion(client, uc, data, result)
-                versions[data.segment] = registry.log_segment(uc, data, result, lineage)
+                versions[data.segment] = registry.log_segment(uc, data, result, uc_lineage)
         if track:
             decision = registry.gate_usecase(client, uc, challengers, champions, versions, gate_cfg)
             summary["usecases"][name]["registered_versions"] = versions
@@ -159,9 +165,11 @@ def main() -> None:
     parser.add_argument("--no-mlflow", action="store_true", help="Day 6 mode: local artifacts only")
     parser.add_argument("--train-cutoff-days", type=int, default=0,
                         help="backtest: drop the last N days of the train window (e.g. 40, 80)")
+    parser.add_argument("--as-of", help="YYYY-MM-DD: split by sliding windows ending at the last day labeled by then "
+                                        "(Airflow passes the run date); default: the Day 4 split")
     args = parser.parse_args()
     out_dir = run(args.usecase, args.run_dir, args.out, track=not args.no_mlflow,
-                  train_cutoff_days=args.train_cutoff_days)
+                  train_cutoff_days=args.train_cutoff_days, as_of=args.as_of)
     print(f"artifacts: {out_dir}")
 
 

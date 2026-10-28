@@ -98,6 +98,15 @@ def test_retrain_only_on_critical_and_after_cooldown():
     assert should_retrain("critical", None, now, 7)[0] is True
 
 
+def test_no_retrain_without_labels_after_production_data_end():
+    now = dt.datetime(2026, 1, 30, 12)
+    end = dt.date(2025, 12, 31)
+    # frozen data: the newest label is the one production was already tested on -> the loop stops
+    assert should_retrain("critical", None, now, 7, data_end=end, labeled_until=end)[0] is False
+    assert should_retrain("critical", None, now, 7, data_end=end, labeled_until=dt.date(2026, 1, 7))[0] is True
+    assert should_retrain("critical", None, now, 7, data_end=None, labeled_until=end)[0] is True
+
+
 # ---- evaluate ----
 
 @pytest.mark.parametrize("drop,expected", [(None, "NO_LABELS"), (-0.02, "OK"), (0.05, "OK"), (0.06, "WARN"),

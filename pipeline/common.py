@@ -13,12 +13,13 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.exceptions import NoSuchTableError
 from pyiceberg.expressions import BooleanExpression
 
-from training.data import resolve_run_dir
+from training.data import ROOT, resolve_run_dir
 
 SETTINGS_PATH = Path(__file__).with_name("monitoring.yaml")
 KEYS = ["master_account", "report_date"]
 FS_TABLES = ["fs_trading_behavior", "fs_margin_balance", "fs_portfolio", "fs_campaign", "fs_demographic",
              "fs_asset_balance"]
+FS_ROOT = ROOT / "data/features/fs"  # daily store: <table>/report_date=<day>/data.parquet + _status/report_date=<day>.json
 
 
 def load_settings(path: Path = SETTINGS_PATH) -> dict:
@@ -40,10 +41,25 @@ def assemble(frames: list[pd.DataFrame]) -> pd.DataFrame:
     return out
 
 
+def fs_partition(table: str, day: dt.date, root: Path | None = None) -> Path:
+    return (root or FS_ROOT) / table / f"report_date={day.isoformat()}" / "data.parquet"
+
+
+def fs_marker(day: dt.date, root: Path | None = None) -> Path:
+    return (root or FS_ROOT) / "_status" / f"report_date={day.isoformat()}.json"
+
+
 def read_snapshot(run_dir: Path, date: dt.date) -> pd.DataFrame:
-    """All feature groups of one day. The parquet filter keeps only that day in memory (1 of 364)."""
-    frames = [pq.read_table(run_dir / f"{name}.parquet", filters=[("report_date", "=", date)]).to_pandas()
-              for name in FS_TABLES]
+    """All feature groups of one day. Prefers the daily store (one partition per day, only read when the day was
+    marked complete); falls back to the approved run's parquet, filtered to that day (1 of 364)."""
+    partitions = {name: fs_partition(name, date) for name in FS_TABLES}
+    if any(path.exists() for path in partitions.values()):
+        if not fs_marker(date).exists():
+            raise ValueError(f"feature partition {date} exists but is not marked complete: rerun scripts.fs_daily")
+        frames = [pq.read_table(path).to_pandas() for path in partitions.values()]
+    else:
+        frames = [pq.read_table(run_dir / f"{name}.parquet", filters=[("report_date", "=", date)]).to_pandas()
+                  for name in FS_TABLES]
     snapshot = assemble(frames)
     if snapshot.empty:
         raise ValueError(f"no feature rows for {date} in {run_dir.name}")

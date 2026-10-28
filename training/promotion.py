@@ -1,10 +1,11 @@
 """Day 7 promotion gate. Pure logic: no MLflow, so every rule is unit-tested.
 
 A challenger may replace @production only if EVERY segment of the use case passes:
-    new_auc    >= prod_auc    - auc_tolerance      (default 0.03)
+    new_auc    >= max(prod_auc - auc_tolerance, auc_floor)   (defaults 0.03 and 0.75)
     new_recall >= prod_recall - recall_tolerance   (default 0.05)
 Both are measured on the same test rows; recall at the SAME alert rate (registry.compare_with_champion).
-A segment with no @production model yet is a baseline: its test ROC-AUC must reach baseline_auc_floor.
+The floor stops a slow slide: each version may lose up to auc_tolerance against the previous one, but never fall below it.
+A segment with no @production model yet is a baseline: its test ROC-AUC must reach the same floor.
 Passing the gate only makes a version ELIGIBLE; @production is set by the approval step (promote.py).
 """
 from __future__ import annotations
@@ -23,7 +24,7 @@ EPS = 1e-9  # 0.80 - 0.03 is 0.7700000000000001 in floats; a challenger exactly 
 class GateConfig:
     auc_tolerance: float = 0.03
     recall_tolerance: float = 0.05
-    baseline_auc_floor: float = 0.55
+    baseline_auc_floor: float = 0.75
 
 
 @dataclass
@@ -43,9 +44,10 @@ def check_segment(new: dict, current: dict | None, cfg: GateConfig) -> tuple[boo
     if current is None:
         ok = new["roc_auc"] + EPS >= cfg.baseline_auc_floor
         return ok, f"baseline auc {new['roc_auc']:.4f} {'>=' if ok else '<'} floor {cfg.baseline_auc_floor}"
-    auc_ok = new["roc_auc"] + EPS >= current["roc_auc"] - cfg.auc_tolerance
+    required = max(current["roc_auc"] - cfg.auc_tolerance, cfg.baseline_auc_floor)
+    auc_ok = new["roc_auc"] + EPS >= required
     recall_ok = new["recall"] + EPS >= current["recall"] - cfg.recall_tolerance
-    reason = (f"auc {new['roc_auc']:.4f} vs prod {current['roc_auc']:.4f} ({'ok' if auc_ok else 'FAIL'}), "
+    reason = (f"auc {new['roc_auc']:.4f} vs prod {current['roc_auc']:.4f}, need {required:.4f} ({'ok' if auc_ok else 'FAIL'}), "
               f"recall {new['recall']:.4f} vs prod {current['recall']:.4f} ({'ok' if recall_ok else 'FAIL'})")
     return auc_ok and recall_ok, reason
 

@@ -3,11 +3,15 @@
 # until it is listed here. config.py rejects labels, keys, split and excluded columns.
 #
 # segment_column: one binary model per value in `segments`; omit `segments` for a single model.
-# class_weights:  dotted path into class_weights.json (fit on train in Day 4, reused as-is).
+# label_horizon_days: the label of day D is known at D + this many days (= label window length).
 # threshold:      chosen on validation. max_f1 | min_recall (value = recall floor).
 
 defaults:
   seed: 42
+  # Sliding time split, anchored on the last day whose label is known at --as-of (as_of - label_horizon_days).
+  # test = last test_days labeled days, then embargo, validation, embargo, train = everything earlier.
+  # 62 / 62 / 30 at as_of 2026-01-30 gives the Day 4 split: train ..06-30, val 07-31..09-30, test 10-31..12-31.
+  windows: {test_days: 62, validation_days: 62, embargo_days: 30}
   n_jobs: 4                # fixed: LightGBM deterministic mode needs a fixed thread count
   lgbm:
     n_estimators: 2000     # upper bound; early stopping on validation picks the real count
@@ -30,7 +34,7 @@ defaults:
 promotion:
   auc_tolerance: 0.03
   recall_tolerance: 0.05
-  baseline_auc_floor: 0.55
+  baseline_auc_floor: 0.75   # absolute AUC floor: for the first version and for every challenger
 
 account_features: &account_features   # = Feast services loan_propensity / overdue_risk, minus margin_segment
   - account_age_days
@@ -66,7 +70,6 @@ use_cases:
     segments: [nu, lu, au]
     numeric_features: *account_features
     categorical_features: []
-    class_weights: segments
     threshold: {rule: max_f1}
 
   overdue_risk:
@@ -77,12 +80,12 @@ use_cases:
     segments: [lu, au]
     numeric_features: *account_features
     categorical_features: []
-    class_weights: overdue_risk.segments
     threshold: {rule: max_f1}
 
   campaign_response:
     dataset: campaign_training_dataset
     label: campaign_response_label_14d
+    label_horizon_days: 14
     segment_column: margin_segment      # used as a feature, not a split: one model
     numeric_features:
       - interest_rate_offer
@@ -102,5 +105,4 @@ use_cases:
       - days_since_last_campaign
       - has_campaign_history
     categorical_features: [channel, offer_type, margin_segment]
-    class_weights: campaign_response
     threshold: {rule: max_f1}

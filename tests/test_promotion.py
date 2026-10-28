@@ -9,8 +9,8 @@ from training.evaluate import recall_at_alert_rate
 from training.promote import check
 from training.promotion import GateConfig, evaluate_gate, load_gate_config, should_promote
 
-PROD = {"nu": {"roc_auc": 0.80, "recall": 0.60}, "lu": {"roc_auc": 0.70, "recall": 0.50},
-        "au": {"roc_auc": 0.75, "recall": 0.55}}
+PROD = {"nu": {"roc_auc": 0.90, "recall": 0.60}, "lu": {"roc_auc": 0.85, "recall": 0.50},
+        "au": {"roc_auc": 0.80, "recall": 0.55}}  # all well above the 0.75 floor, so the relative rule decides
 
 
 def shifted(auc=0.0, recall=0.0, segments=("nu", "lu", "au")):
@@ -34,7 +34,7 @@ class GateTests(unittest.TestCase):
         self.assertFalse(should_promote(shifted(recall=-0.06, segments=("au",)), PROD))
 
     def test_exact_boundary_passes(self):
-        # 0.80 - 0.03 and 0.60 - 0.05 are not exact in binary floats; the gate must still accept them
+        # 0.90 - 0.03 and 0.60 - 0.05 are not exact in binary floats; the gate must still accept them
         self.assertTrue(should_promote(shifted(auc=-0.03, recall=-0.05), PROD))
 
     def test_just_beyond_boundary_fails(self):
@@ -47,6 +47,16 @@ class GateTests(unittest.TestCase):
         self.assertEqual(decision.status, "BASELINE_PASS")
         self.assertFalse(should_promote({"nu": {"roc_auc": 0.54, "recall": 0.9}}, {"nu": None}))
 
+    def test_floor_stops_slow_slide_below_it(self):
+        # champion at 0.77: the tolerance alone would accept 0.74, the 0.75 floor must not
+        cfg = GateConfig(auc_tolerance=0.03, recall_tolerance=0.05, baseline_auc_floor=0.75)
+        champion = {"nu": {"roc_auc": 0.77, "recall": 0.60}}
+        self.assertTrue(should_promote({"nu": {"roc_auc": 0.75, "recall": 0.60}}, champion, cfg))
+        self.assertFalse(should_promote({"nu": {"roc_auc": 0.74, "recall": 0.60}}, champion, cfg))
+        # a strong champion keeps the relative rule: 0.90 - 0.03 = 0.87 is the bar, not the floor
+        strong = {"nu": {"roc_auc": 0.90, "recall": 0.60}}
+        self.assertFalse(should_promote({"nu": {"roc_auc": 0.86, "recall": 0.60}}, strong, cfg))
+
     def test_new_segment_next_to_existing_production(self):
         decision = evaluate_gate(PROD, {"nu": PROD["nu"], "lu": PROD["lu"], "au": None})
         self.assertEqual(decision.status, "PASS")
@@ -55,7 +65,7 @@ class GateTests(unittest.TestCase):
         self.assertFalse(should_promote({}, {}))
 
     def test_repo_config(self):
-        self.assertEqual(load_gate_config(), GateConfig(0.03, 0.05, 0.55))
+        self.assertEqual(load_gate_config(), GateConfig(0.03, 0.05, 0.75))
 
 
 def version(v, run="r1", gate="PASS"):

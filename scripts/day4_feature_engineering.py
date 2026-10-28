@@ -240,9 +240,9 @@ def assess(con, raw_end):
     check("candidate.null_required_rows", scalar(con, "SELECT count(*) FROM candidate WHERE " + " OR ".join(f'"{k}" IS NULL' for k in columns)))
     check("candidate.duplicate_keys", scalar(con, "SELECT count(*) FROM (SELECT master_account,report_date FROM candidate GROUP BY ALL HAVING count(*)<>1)"))
     check("candidate.nonempty", scalar(con, "SELECT count(*) FROM candidate") > 0, True)
-    check("candidate.invalid_domains", scalar(con, "SELECT count(*) FROM candidate WHERE margin_segment NOT IN ('nu','lu','au') OR split NOT IN ('train','validation','test') OR loan_label_next NOT IN (0,1) OR account_age_days<30 OR trade_count_7d>trade_count_30d OR total_trading_amount_7d>total_trading_amount_30d OR active_trading_days_30d NOT BETWEEN 0 AND 30"))
+    check("candidate.invalid_domains", scalar(con, "SELECT count(*) FROM candidate WHERE margin_segment NOT IN ('nu','lu','au') OR split NOT IN ('train','validation','test','embargo') OR loan_label_next NOT IN (0,1) OR account_age_days<30 OR trade_count_7d>trade_count_30d OR total_trading_amount_7d>total_trading_amount_30d OR active_trading_days_30d NOT BETWEEN 0 AND 30"))
     check("candidate.incomplete_label_window", con.execute("SELECT count(*) FROM candidate WHERE report_date+INTERVAL 30 DAY>?", [raw_end]).fetchone()[0])
-    check("candidate.embargo_rows", scalar(con, "SELECT count(*) FROM candidate WHERE report_date BETWEEN '2025-07-01' AND '2025-07-30' OR report_date BETWEEN '2025-10-01' AND '2025-10-30'"))
+    check("candidate.embargo_rows_untagged", scalar(con, "SELECT count(*) FROM candidate WHERE (report_date BETWEEN '2025-07-01' AND '2025-07-30' OR report_date BETWEEN '2025-10-01' AND '2025-10-30') AND split<>'embargo'"))
     check("candidate.balance_formulas", scalar(con, """SELECT count(*) FROM candidate WHERE
         NAV<>asset_value+cash_balance-margin_debt OR
         abs(margin_utilization_ratio-CASE WHEN margin_limit=0 THEN 0.0 ELSE margin_debt::DOUBLE/margin_limit END)>1e-10 OR
@@ -312,7 +312,7 @@ def assess(con, raw_end):
                OR CAST(timezone('Asia/Ho_Chi_Minh', CAST(c.sent_at AS TIMESTAMPTZ)) AS DATE)<a.account_open_date+INTERVAL 30 DAY)"""))
         check("campaign.duplicate_keys", scalar(con, "SELECT count(*) FROM (SELECT campaign_event_id FROM campaign_candidate GROUP BY ALL HAVING count(*)>1)"))
         check("campaign.invalid_domains", scalar(con, """SELECT count(*) FROM campaign_candidate WHERE campaign_response_label_14d NOT IN (0,1)
-            OR campaign_response_label_14d IS NULL OR split NOT IN ('train','validation','test')
+            OR campaign_response_label_14d IS NULL OR split NOT IN ('train','validation','test','embargo')
             OR channel NOT IN ('APP','SMS','EMAIL') OR offer_type NOT IN ('RATE_DISCOUNT','FEE_WAIVER','LIMIT_BOOST')
             OR interest_rate_offer NOT BETWEEN 0.065 AND 0.105 OR account_age_days<30 OR campaign_count_30d<0"""))
         check("campaign.incomplete_label_window", con.execute("SELECT count(*) FROM campaign_candidate WHERE report_date+INTERVAL 14 DAY>?", [raw_end]).fetchone()[0])
@@ -344,7 +344,7 @@ def assess(con, raw_end):
             "scoring_report_date_range": [str(x) for x in con.execute("SELECT min(report_date),max(report_date) FROM scoring_features").fetchone()],
             "by_segment": rates, "by_split_segment": stats,
             "last_snapshot_shares": last_shares,
-            "embargo_rows_excluded": scalar(con, "SELECT count(*) FROM snapshots WHERE split IS NULL"),
+            "embargo_rows_kept": scalar(con, "SELECT count(*) FROM candidate WHERE split='embargo'"),
             "null_required_rows": scalar(con, "SELECT count(*) FROM candidate WHERE " + " OR ".join(f'"{k}" IS NULL' for k in columns))}
 
 
@@ -413,6 +413,24 @@ def write_json(path, obj):
             temporary.unlink(missing_ok=True)
 
 
+def load_sources(con, cat, explicit_namespace=None):
+    """Copy the approved Gold tables from the Iceberg catalog into DuckDB. Returns (namespace, snapshot versions)."""
+    pointer = ROOT / 'data/source_current.json'
+    namespace = explicit_namespace or (json.loads(pointer.read_text())['namespace'] if pointer.exists() else 'raw')
+    versions = {}
+    for name in ALL_SOURCE_KEYS:
+        if not cat.table_exists(f"{namespace}.{name}"):
+            continue  # validate_sources reports missing tables without a SQL bind error.
+        table = cat.load_table(f"{namespace}.{name}")
+        snapshot = table.current_snapshot()
+        versions[name] = {"metadata": table.metadata_location, "snapshot_id": snapshot.snapshot_id if snapshot else None}
+        con.register("source_arrow", table.scan(snapshot_id=snapshot.snapshot_id if snapshot else None).to_arrow())
+        con.execute(f"CREATE TABLE {name} AS SELECT * FROM source_arrow")
+        con.unregister("source_arrow")
+        print(f"Read {namespace}.{name}: {scalar(con, f'SELECT count(*) FROM {name}'):,}", flush=True)
+    return namespace, versions
+
+
 def run(args):
     started = time.monotonic()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
@@ -422,18 +440,7 @@ def run(args):
     con.execute("SET threads=4")
     cat = catalog()
     source_pointer = ROOT / 'data/source_current.json'
-    source_namespace = args.source_namespace or (json.loads(source_pointer.read_text())['namespace'] if source_pointer.exists() else 'raw')
-    source_versions = {}
-    for name in ALL_SOURCE_KEYS:
-        if not cat.table_exists(f"{source_namespace}.{name}"):
-            continue  # validate_sources reports missing tables without a SQL bind error.
-        table = cat.load_table(f"{source_namespace}.{name}")
-        snapshot = table.current_snapshot()
-        source_versions[name] = {"metadata": table.metadata_location, "snapshot_id": snapshot.snapshot_id if snapshot else None}
-        con.register("source_arrow", table.scan(snapshot_id=snapshot.snapshot_id if snapshot else None).to_arrow())
-        con.execute(f"CREATE TABLE {name} AS SELECT * FROM source_arrow")
-        con.unregister("source_arrow")
-        print(f"Read {source_namespace}.{name}: {scalar(con, f'SELECT count(*) FROM {name}'):,}", flush=True)
+    source_namespace, source_versions = load_sources(con, cat, args.source_namespace)
     source_report = validate_sources(con, args.raw_end)
     source_report.update({"source_namespace": source_namespace, "source_snapshots": source_versions, "raw_end": args.raw_end})
     report_dir = ROOT / "data/features"
@@ -543,8 +550,8 @@ def write_report(report, weight_result, out):
         lines.append(f"| {name} | {', '.join(fields)} |")
     lines += [
         "", "## Split và kết quả", "",
-        "Train: 2025-02-01..2025-06-30; validation: 2025-07-31..2025-09-30; test: 2025-10-31..2025-12-31.",
-        f"Đã loại {report['embargo_rows_excluded']:,} snapshot embargo. Chỉ lấy tài khoản ACTIVE, tuổi ≥30 ngày và đủ 30 ngày dữ liệu tương lai.", "",
+        "Split mặc định (neo vào ngày có nhãn cuối 2025-12-31): train 2025-02-01..2025-06-30; validation 2025-07-31..2025-09-30; test 2025-10-31..2025-12-31. training.train --as-of chia lại theo cửa sổ trượt.",
+        f"Giữ {report['embargo_rows_kept']:,} snapshot embargo (split='embargo') để training.train --as-of chia lại theo ngày. Chỉ lấy tài khoản ACTIVE, tuổi ≥30 ngày và đủ 30 ngày dữ liệu tương lai.", "",
         "| Split | Segment | Số dòng | Positive | Positive rate |", "|---|---|---:|---:|---:|",
     ]
     for row in report["by_split_segment"]:

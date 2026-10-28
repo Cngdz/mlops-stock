@@ -57,9 +57,13 @@ with DAG(
     schedule="@weekly",
     catchup=False,
     max_active_runs=1,
+    # as_of anchors the sliding train/validation/test split on the last day labeled by then. Empty = the run date,
+    # so every scheduled retrain slides forward; trigger_retrain passes score_date.
+    params={"as_of": ""},
     tags=["mlops"],
 ):
-    train = step("train", ["python", "-m"], ["training.train", "--usecase", "loan_propensity"], memory="2Gi")
+    train = step("train", ["python", "-m"],
+                 ["training.train", "--usecase", "loan_propensity", "--as-of", "{{ params.as_of or ds }}"], memory="2Gi")
     # promote WITHOUT --approve: prints the gate result and exits 1 if REFUSED.
     # retries=0: a refusal is a verdict, not a transient failure.
     gate = step("report_gate", ["python", "-m"], ["training.promote", "--usecase", "loan_propensity"], retries=0)
@@ -79,7 +83,8 @@ with DAG(
                    ["pipeline.predict", "--date", "{{ params.score_date }}"], memory="1536Mi")
     drift = step("drift", ["python", "-m"],
                  ["pipeline.drift", "--date", "{{ params.score_date }}"], memory="1536Mi")
-    # exit 0 = critical drift past the cooldown, exit 99 = skip (this task and the trigger turn pink, not red).
+    # exit 0 = critical drift, labels newer than the production data_end, cooldown passed;
+    # exit 99 = skip (this task and the trigger turn pink, not red).
     # retries=1: exit 99 is a skip and is never retried, but a pod that fails to start (seen once: 300 s with no
     # scheduling event, not reproducible) or a transient MLflow/Postgres error deserves one more try.
     retrain_check = step("retrain_check", ["python", "-m"],
@@ -87,7 +92,8 @@ with DAG(
                           "--cooldown-days", "{{ params.cooldown_days }}"],
                          retries=1, skip_on_exit_code=99)
     # The retrained model still stops at @staging: drift can start training, never promotion.
-    retrain = TriggerDagRunOperator(task_id="trigger_retrain", trigger_dag_id="loan_propensity_train")
+    retrain = TriggerDagRunOperator(task_id="trigger_retrain", trigger_dag_id="loan_propensity_train",
+                                    conf={"as_of": "{{ params.score_date }}"})
     predict >> drift >> retrain_check >> retrain
 
 

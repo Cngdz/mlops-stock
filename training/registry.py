@@ -81,6 +81,7 @@ def log_segment(uc: UseCase, data: SegmentData, result, lineage: dict) -> str:
     name = model_name(uc.name, data.segment)
     for key, value in {"threshold": selected["threshold"], "model_type": result.selected,
                        "train_run_id": lineage["train_run_id"], "feature_run_id": lineage["feature_run_id"],
+                       "data_end": lineage["data_end"],
                        "test_roc_auc": selected["test"]["roc_auc"], "test_recall": selected["test"]["recall"]}.items():
         client.set_model_version_tag(name, version, key, str(value))
     client.set_registered_model_alias(name, STAGING, version)

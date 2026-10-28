@@ -29,8 +29,35 @@ def check_run(run_dir: Path) -> dict:
     weights = json.loads((run_dir / "class_weights.json").read_text(encoding="utf-8"))
     if not weights.get("approved_for_training"):
         raise RuntimeError(f"{run_dir.name}: class_weights.json not approved_for_training")
-    return {"run_id": quality.get("run_id", run_dir.name), "feature_contract": quality.get("feature_contract"),
-            "class_weights": weights}
+    return {"run_id": quality.get("run_id", run_dir.name), "feature_contract": quality.get("feature_contract")}
+
+
+def label_end(dates: pd.Series, as_of: pd.Timestamp | None, horizon_days: int) -> pd.Timestamp:
+    """Last report_date whose label is known at as_of: the label of D closes at D + horizon. Pure."""
+    latest = pd.to_datetime(dates).max()
+    return latest if as_of is None else min(latest, pd.Timestamp(as_of) - pd.Timedelta(days=horizon_days))
+
+
+def split_windows(end: pd.Timestamp, test_days: int, validation_days: int, embargo_days: int) -> dict:
+    """(first, last) report_date of each split, counted back from the last labeled day. Embargo gaps keep a
+    label window of the earlier split from reaching into the later one. train has no lower bound. Pure."""
+    day = pd.Timedelta(days=1)
+    test_first = end - (test_days - 1) * day
+    val_last = test_first - (embargo_days + 1) * day
+    val_first = val_last - (validation_days - 1) * day
+    return {"train": (None, val_first - (embargo_days + 1) * day), "validation": (val_first, val_last),
+            "test": (test_first, end)}
+
+
+def resplit(df: pd.DataFrame, uc: UseCase, as_of) -> pd.DataFrame:
+    """Replace the Day 4 split with the sliding split for as_of. Embargo rows and rows whose label was not
+    yet known at as_of are dropped. Needs a run that keeps every labeled day (split='embargo' included)."""
+    dates = pd.to_datetime(df["report_date"])
+    windows = split_windows(label_end(dates, as_of, uc.label_horizon_days), **uc.windows)
+    split = pd.Series(None, index=df.index, dtype=object)
+    for name, (first, last) in windows.items():
+        split[((dates >= first) if first is not None else True) & (dates <= last)] = name
+    return df.assign(split=split).dropna(subset=["split"])
 
 
 def check_splits(df: pd.DataFrame, name: str) -> None:
@@ -42,7 +69,8 @@ def check_splits(df: pd.DataFrame, name: str) -> None:
             raise ValueError(f"{name}: {earlier} ends {bounds[earlier][1]} but {later} starts {bounds[later][0]}")
 
 
-def load_frame(run_dir: Path, uc: UseCase) -> pd.DataFrame:
+def load_frame(run_dir: Path, uc: UseCase, as_of=None) -> pd.DataFrame:
+    """as_of=None keeps the Day 4 split (anchored on the run's last labeled day)."""
     columns = list(dict.fromkeys(uc.features + [uc.label, "split", "report_date"]
                                  + ([uc.segment_column] if uc.segment_column else [])
                                  + (["overdue_eligible"] if uc.row_filter else [])))
@@ -52,6 +80,7 @@ def load_frame(run_dir: Path, uc: UseCase) -> pd.DataFrame:
     if df[uc.label].isna().any():
         raise ValueError(f"{uc.name}: {int(df[uc.label].isna().sum())} rows with null {uc.label}")
     df = df.assign(**{uc.label: df[uc.label].astype(int)})
+    df = resplit(df, uc, as_of) if as_of is not None else df[df["split"] != "embargo"]
     check_splits(df, uc.name)
     return df.reset_index(drop=True)
 
@@ -69,13 +98,10 @@ def cut_train(df: pd.DataFrame, days: int) -> pd.DataFrame:
     return df[~train | (dates <= cutoff)].reset_index(drop=True)
 
 
-def segment_weights(class_weights: dict, uc: UseCase, segment: str | None) -> dict[int, float]:
-    node = class_weights
-    for key in uc.class_weights.split("."):
-        node = node[key]
-    if segment is not None:
-        node = node[segment]
-    return {int(k): float(v) for k, v in node["weights"].items()}
+def balanced_weights(y_train: np.ndarray) -> dict[int, float]:
+    """N / (2 * N_class) on the train rows actually used (same formula as the Day 4 class_weights.json). Pure."""
+    values, counts = np.unique(y_train, return_counts=True)
+    return {int(v): len(y_train) / (2 * c) for v, c in zip(values, counts)}
 
 
 @dataclass
@@ -87,13 +113,13 @@ class SegmentData:
     weights: dict[int, float]
 
 
-def iter_segments(df: pd.DataFrame, uc: UseCase, class_weights: dict):
+def iter_segments(df: pd.DataFrame, uc: UseCase):
     groups = [(s, df[df[uc.segment_column] == s]) for s in uc.segments] if uc.segments else [("all", df)]
     for segment, part in groups:
-        weights = segment_weights(class_weights, uc, segment if uc.segments else None)
         X = {s: part.loc[part["split"] == s, uc.features] for s in SPLITS}
         y = {s: part.loc[part["split"] == s, uc.label].to_numpy() for s in SPLITS}
         for s in SPLITS:
             if len(np.unique(y[s])) < 2:
                 raise ValueError(f"{uc.name}/{segment}/{s}: needs both classes, got {np.unique(y[s])}")
+        weights = balanced_weights(y["train"])
         yield SegmentData(segment, X, y, np.vectorize(weights.get)(y["train"]).astype(float), weights)

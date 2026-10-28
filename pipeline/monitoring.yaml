@@ -4,7 +4,8 @@
 usecase: loan_propensity
 
 drift:
-  # Reference = last snapshot of the train split (2025-02-01..2025-06-30) the production models learned from.
+  # Official reference = data_end tag of the @production versions (last labeled day they were tested on); it
+  # moves with each promotion. This date is only the fallback for versions trained before that tag existed.
   reference_date: "2025-06-30"
   # Drift Ratio = drifted features / all model features (Evidently column-level result).
   # Upper bounds, inclusive: ratio 0 -> none, <= 0.20 -> medium, <= 0.50 -> high, above -> critical.
@@ -12,8 +13,8 @@ drift:
     none: 0.0
     medium: 0.20
     high: 0.50
-  # critical triggers retraining, but the training data only changes when a new feature run is published from the
-  # host. Without a cooldown a lasting drift would retrain every day on the same data.
+  # critical triggers retraining only when labels exist after the production data_end (otherwise the retrain
+  # would see the same rows), and at most once per cooldown while new labels trickle in.
   retrain_cooldown_days: 7
 
 evaluate:

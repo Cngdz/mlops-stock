@@ -110,17 +110,19 @@ SELECT f.* EXCLUDE(history_count, recent_events, campaign_count_14d_internal),
                    AND future_balance.normalized_margin_status='OVERDUE') END AS TINYINT) AS overdue_label_next_30d,
     CASE WHEN f.report_date BETWEEN '2025-02-01' AND '2025-06-30' THEN 'train'
          WHEN f.report_date BETWEEN '2025-07-31' AND '2025-09-30' THEN 'validation'
-         WHEN f.report_date BETWEEN '2025-10-31' AND '2025-12-31' THEN 'test' END AS split,
+         WHEN f.report_date BETWEEN '2025-10-31' AND '2025-12-31' THEN 'test' ELSE 'embargo' END AS split,
     f.history_count, f.recent_events, w.next_events_14 AS baseline_events_14d, f.campaign_count_14d_internal
 FROM scoring_features f JOIN windowed w USING(master_account, report_date)
 WHERE f.report_date<=DATE '2025-12-31'
   AND f.report_date<=$raw_end::DATE-INTERVAL 30 DAY;
 
-CREATE TABLE candidate AS SELECT * FROM snapshots WHERE split IS NOT NULL;
+-- Embargo rows are kept (split='embargo'): this split is only the default one, anchored on the last
+-- labeled day. training.train --as-of re-splits by date and needs every labeled day to do so.
+CREATE TABLE candidate AS SELECT * FROM snapshots;
 
 -- Campaign-response grain: one DELIVERED campaign sent to an ACTIVE account.
 -- Account features come from the shared candidate row of the send date, so campaigns sent
--- to dormant, closed or too-young accounts, or inside embargo, are dropped by the join.
+-- to dormant, closed or too-young accounts are dropped by the join.
 -- campaign_count_30d and days_since_last_campaign describe campaigns BEFORE this one.
 CREATE TABLE campaign_candidate AS
 SELECT c.campaign_event_id, c.campaign_id, c.master_account, s.report_date,

@@ -2,9 +2,9 @@
 
 ## Kết luận
 
-**PASS 90/90 quality checks** trên nguồn raw_day4_v3e.
-Run: 20261007T095923177784; 1,284,182 snapshot; 81.66 giây cho pipeline ngày 4.
-Positive rate toàn bộ: 23.1744%. Null ở cột bắt buộc: 0.
+**PASS 90/90 quality checks** trên nguồn raw_day4_v4.
+Run: 20261026T104902612352; 1,580,646 snapshot; 193.19 giây cho pipeline ngày 4.
+Positive rate toàn bộ: 24.6053%. Null ở cột bắt buộc: 0.
 
 Đầu ra đã được duyệt qua data/features/current.json. Nguồn mặc định cho lần chạy tiếp theo nằm trong data/source_current.json.
 
@@ -44,26 +44,29 @@ Không xuất days_since_last_margin_event, biến ẩn hoặc cờ generator v�
 
 ## Split và kết quả
 
-Train: 2025-02-01..2025-06-30; validation: 2025-07-31..2025-09-30; test: 2025-10-31..2025-12-31.
-Đã loại 296,464 snapshot embargo. Chỉ lấy tài khoản ACTIVE, tuổi ≥30 ngày và đủ 30 ngày dữ liệu tương lai.
+Split mặc định (neo vào ngày có nhãn cuối 2025-12-31): train 2025-02-01..2025-06-30; validation 2025-07-31..2025-09-30; test 2025-10-31..2025-12-31. training.train --as-of chia lại theo cửa sổ trượt.
+Giữ 296,464 snapshot embargo (split='embargo') để training.train --as-of chia lại theo ngày. Chỉ lấy tài khoản ACTIVE, tuổi ≥30 ngày và đủ 30 ngày dữ liệu tương lai.
 
 | Split | Segment | Số dòng | Positive | Positive rate |
 |---|---|---:|---:|---:|
-| test | au | 179,150 | 59,997 | 33.4898% |
-| test | lu | 44,710 | 9,656 | 21.5970% |
-| test | nu | 71,125 | 6,608 | 9.2907% |
-| train | au | 223,966 | 77,029 | 34.3932% |
-| train | lu | 23,253 | 6,685 | 28.7490% |
-| train | nu | 433,013 | 60,652 | 14.0070% |
-| validation | au | 169,603 | 57,120 | 33.6786% |
-| validation | lu | 33,184 | 7,599 | 22.8996% |
-| validation | nu | 106,178 | 12,255 | 11.5419% |
+| embargo | au | 118,039 | 45,763 | 38.7694% |
+| embargo | lu | 73,413 | 20,481 | 27.8983% |
+| embargo | nu | 105,012 | 14,041 | 13.3709% |
+| test | au | 119,817 | 47,015 | 39.2390% |
+| test | lu | 106,211 | 24,055 | 22.6483% |
+| test | nu | 68,957 | 5,108 | 7.4075% |
+| train | au | 158,627 | 57,138 | 36.0203% |
+| train | lu | 39,693 | 15,484 | 39.0094% |
+| train | nu | 481,912 | 75,707 | 15.7097% |
+| validation | au | 125,515 | 48,312 | 38.4910% |
+| validation | lu | 77,816 | 22,382 | 28.7627% |
+| validation | nu | 105,634 | 13,436 | 12.7194% |
 
 Tỷ trọng tại snapshot cuối (gate: mỗi segment ≥10%):
 
 - nu: 21.4965%.
-- lu: 16.2122%.
-- au: 62.2913%.
+- lu: 39.3997%.
+- au: 39.1038%.
 
 ## Class imbalance
 
@@ -71,9 +74,9 @@ Balanced class weight = N/(2×N_class), tính riêng từng segment trên train.
 
 | Segment | Weight 0 | Weight 1 |
 |---|---:|---:|
-| nu | 0.581442 | 3.569651 |
-| lu | 0.701744 | 1.739192 |
-| au | 0.762116 | 1.453777 |
+| nu | 0.593188 | 3.182744 |
+| lu | 0.819798 | 1.281742 |
+| au | 0.781498 | 1.388104 |
 
 ## Kiểm chứng
 
@@ -86,18 +89,18 @@ Balanced class weight = N/(2×N_class), tính riêng từng segment trên train.
 
 ## Đầu ra
 
-Thư mục: C:\hoctapUET\DE\MLops\data\features\day4_runs\20261007T095923177784
+Thư mục: C:\hoctapUET\DE\MLops\data\features\day4_runs\20261026T104902612352
 
-- fs_demographic.parquet: 1,722,576 dòng; Iceberg features_20261007t095923177784.fs_demographic.
-- fs_trading_behavior.parquet: 1,722,576 dòng; Iceberg features_20261007t095923177784.fs_trading_behavior.
-- fs_margin_balance.parquet: 1,722,576 dòng; Iceberg features_20261007t095923177784.fs_margin_balance.
-- fs_asset_balance.parquet: 1,722,576 dòng; Iceberg features_20261007t095923177784.fs_asset_balance.
-- fs_portfolio.parquet: 1,722,576 dòng; Iceberg features_20261007t095923177784.fs_portfolio.
-- fs_campaign.parquet: 1,722,576 dòng; Iceberg features_20261007t095923177784.fs_campaign.
-- training_dataset.parquet: 1,284,182 dòng; Iceberg features_20261007t095923177784.training_dataset.
-- campaign_training_dataset.parquet: 28,018 dòng; Iceberg features_20261007t095923177784.campaign_training_dataset.
-- loan_overdue_labels.parquet: 1,284,182 dòng; Iceberg features_20261007t095923177784.loan_overdue_labels.
-- campaign_labels.parquet: 27,844 dòng; Iceberg features_20261007t095923177784.campaign_labels.
+- fs_demographic.parquet: 1,722,576 dòng; Iceberg features_20261026t104902612352.fs_demographic.
+- fs_trading_behavior.parquet: 1,722,576 dòng; Iceberg features_20261026t104902612352.fs_trading_behavior.
+- fs_margin_balance.parquet: 1,722,576 dòng; Iceberg features_20261026t104902612352.fs_margin_balance.
+- fs_asset_balance.parquet: 1,722,576 dòng; Iceberg features_20261026t104902612352.fs_asset_balance.
+- fs_portfolio.parquet: 1,722,576 dòng; Iceberg features_20261026t104902612352.fs_portfolio.
+- fs_campaign.parquet: 1,722,576 dòng; Iceberg features_20261026t104902612352.fs_campaign.
+- training_dataset.parquet: 1,580,646 dòng; Iceberg features_20261026t104902612352.training_dataset.
+- campaign_training_dataset.parquet: 36,399 dòng; Iceberg features_20261026t104902612352.campaign_training_dataset.
+- loan_overdue_labels.parquet: 1,580,646 dòng; Iceberg features_20261026t104902612352.loan_overdue_labels.
+- campaign_labels.parquet: 36,212 dòng; Iceberg features_20261026t104902612352.campaign_labels.
 - quality_report.json: checks, provenance, hashes.
 - class_weights.json: weights đã duyệt.
 - data/features/current.json: trỏ đến phiên bản training đã duyệt.
