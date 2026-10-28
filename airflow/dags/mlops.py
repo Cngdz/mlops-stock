@@ -3,10 +3,16 @@
 Training stops at @staging. @production is set only by a human (training.promote --approve), so no
 task here may ever pass --approve.
 
+DAGs:
+  feature_store_daily        Gold -> fs_* partition of day T (Iceberg, MinIO), then the COMPLETE marker in control.fs_status
+  feature_store_maintenance  weekly Iceberg housekeeping of fs_*
+  loan_propensity_train / _predict / _evaluate     (predict waits for the feature store day first)
+
 The synthetic data has no "today": its last feature day is 2026-01-30 and labels end 2025-12-31, so the dates are
-DAG params (editable in "Trigger DAG w/ config"). In production they would be {{ ds }}-based.
+DAG params (editable in "Trigger DAG w/ config"). In production they would be {{ ds }}-based; feature_store_daily
+already defaults to yesterday: trigger it with {"report_date": "2026-01-30"} for the synthetic data.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
@@ -51,6 +57,46 @@ def step(task_id: str, cmds: list[str], args: list[str], memory: str = "1Gi", re
     )
 
 
+# ---- Feature store -------------------------------------------------------------------------------------------
+REPORT_DATE = "{{ params.report_date or data_interval_end | ds }}"
+STAGING = "tmp_fs_{{ (params.report_date or data_interval_end | ds) | replace('-', '') }}"
+
+with DAG(
+    "feature_store_daily",
+    start_date=datetime(2026, 10, 1),
+    schedule="0 23 * * *",  # 23:00 UTC = 06:00 Asia/Ho_Chi_Minh, before the 07:00 predict DAG
+    catchup=False,
+    max_active_runs=1,
+    params={"report_date": ""},  # empty = yesterday (data interval end)
+    tags=["mlops", "features"],
+):
+    # Gold not there yet is the expected failure: retry for an hour before giving up.
+    check = step("check_source", ["python", "-m"], ["features.check_source", "--date", REPORT_DATE], retries=4,
+                 retry_delay=timedelta(minutes=15))
+    # Reads the small Gold tables in full (accumulated values) and the large ones for 30 days: 0.7 GB measured on the
+    # synthetic year, so 2Gi leaves room for a longer history.
+    compute = step("compute_features", ["python", "-m"],
+                   ["features.compute", "--date", REPORT_DATE, "--out", STAGING], memory="2Gi")
+    write = step("write_partitions", ["python", "-m"],
+                 ["features.write", "--date", REPORT_DATE, "--mode", "overwrite-partition", "--staging", STAGING])
+    # retries=0: a failed gate is a verdict on the data, not a transient error. Day T stays unpublished.
+    quality = step("quality_gate", ["python", "-m"], ["features.quality", "--date", REPORT_DATE], retries=0)
+    publish = step("publish_marker", ["python", "-m"], ["features.publish", "--date", REPORT_DATE])
+    check >> compute >> write >> quality >> publish
+
+with DAG(
+    "feature_store_maintenance",
+    start_date=datetime(2026, 10, 1),
+    schedule="0 20 * * 6",  # Saturday 20:00 UTC = Sunday 03:00 VN, away from the daily run
+    catchup=False,
+    max_active_runs=1,
+    tags=["mlops", "features"],
+):
+    step("iceberg_maintenance", ["python", "-m"],
+         ["features.maintenance", "--retention-months", "12", "--expire-snapshots", "--remove-orphans"],
+         memory="1536Mi")
+
+
 with DAG(
     "loan_propensity_train",
     start_date=datetime(2026, 10, 1),
@@ -79,6 +125,11 @@ with DAG(
     params={"score_date": "2026-01-30", "cooldown_days": 7},
     tags=["mlops"],
 ):
+    # The sensor: scores only a day the feature store marked COMPLETE (control.fs_status). Each try polls for 30 min;
+    # up to 12 tries give a 6 h wait, then the run fails (no partition, or a failed quality gate).
+    wait = step("wait_features", ["python", "-m"],
+                ["features.status", "--date", "{{ params.score_date }}", "--wait", "--timeout-minutes", "30"],
+                retries=11, retry_delay=timedelta(minutes=1))
     predict = step("predict", ["python", "-m"],
                    ["pipeline.predict", "--date", "{{ params.score_date }}"], memory="1536Mi")
     drift = step("drift", ["python", "-m"],
@@ -94,7 +145,7 @@ with DAG(
     # The retrained model still stops at @staging: drift can start training, never promotion.
     retrain = TriggerDagRunOperator(task_id="trigger_retrain", trigger_dag_id="loan_propensity_train",
                                     conf={"as_of": "{{ params.score_date }}"})
-    predict >> drift >> retrain_check >> retrain
+    wait >> predict >> drift >> retrain_check >> retrain
 
 
 with DAG(

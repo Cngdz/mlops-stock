@@ -1,4 +1,4 @@
-"""Iceberg catalog for in-cluster tables (predictions, drift, evaluation).
+"""Iceberg catalog for in-cluster tables: the feature store (features), Gold (gold) and monitoring (predictions, drift, evaluation).
 
 Catalog = PyIceberg SqlCatalog stored in the Postgres database `iceberg_catalog` (the Postgres that already backs
 MLflow); data files live in MinIO under s3://warehouse/. Locations are s3:// URIs, so pods and the host read the
@@ -14,6 +14,7 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.catalog.sql import SqlCatalog
 
 NAMESPACE = "monitoring"
+FEATURES_NAMESPACE = "features"
 
 
 def load() -> Catalog:
